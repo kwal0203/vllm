@@ -93,7 +93,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("bench", "profile"), default="bench")
     parser.add_argument("--rows", type=int, nargs="+", default=None)
-    parser.add_argument("--width", type=int, default=202048)
+    parser.add_argument("--width", type=int, nargs="+", default=[202048])
     parser.add_argument("--dtype", choices=(*DTYPES, "all"), default=None)
     parser.add_argument("--repeats", type=int, default=5)
     args = parser.parse_args()
@@ -106,17 +106,20 @@ def main() -> None:
     dtype_name = args.dtype or ("fp32" if args.mode == "profile" else "all")
     dtype_names = list(DTYPES) if dtype_name == "all" else [dtype_name]
 
-    if args.width < 1 or any(row < 1 for row in rows):
-        parser.error("rows and width must be positive")
+    if any(width < 1 for width in args.width) or any(row < 1 for row in rows):
+        parser.error("rows and widths must be positive")
     if args.repeats < 1:
         parser.error("repeats must be positive")
-    if args.mode == "profile" and (len(rows) != 1 or len(dtype_names) != 1):
-        parser.error("profile mode requires one row count and one dtype")
+    if args.mode == "profile" and (
+        len(rows) != 1 or len(args.width) != 1 or len(dtype_names) != 1
+    ):
+        parser.error("profile mode requires one row count, one width, and one dtype")
 
     torch.manual_seed(0)
-    for row in rows:
-        for name in dtype_names:
-            benchmark_case(row, args.width, name, args.mode, args.repeats)
+    for width in args.width:
+        for row in rows:
+            for name in dtype_names:
+                benchmark_case(row, width, name, args.mode, args.repeats)
 
 
 if __name__ == "__main__":

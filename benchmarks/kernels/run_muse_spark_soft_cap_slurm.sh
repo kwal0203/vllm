@@ -170,7 +170,7 @@ PY
         -v -ra --junitxml="$run_dir/pytest.xml"
     run_logged benchmark.log .venv/bin/python \
         benchmarks/kernels/benchmark_muse_spark_mul_tanh_soft_cap.py \
-        --rows 1 8 32 --width 202048 --dtype all --repeats 5
+        --rows 1 8 32 --width 202048 202049 --dtype all --repeats 5
     if [[ $(git rev-parse HEAD) != "$expected_commit" ]] || \
         [[ -n $(git status --porcelain) ]]; then
         echo "The checkout changed during the run; discard these results." >&2
