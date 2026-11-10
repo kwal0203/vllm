@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import argparse
-import math
 from typing import Any
 
 import torch
 
 import vllm._custom_ops  # noqa: F401
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import direct_register_custom_op
 
 HAS_CUTEDSL: bool = True
 
@@ -313,209 +313,19 @@ def muse_spark_mul_tanh_soft_cap(
         )
 
 
-if __name__ == "__main__":
-    import argparse
-    import math
-    from itertools import product
+def _soft_cap_fake(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    multiplier: float,
+    soft_cap_temp: float,
+) -> None:
+    return
 
-    import vllm._custom_ops  # noqa: F401
 
-    torch.manual_seed(0)
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--mode",
-        choices=("check", "bench", "profile"),
-        default="check",
+if current_platform.is_cuda() and HAS_CUTEDSL:
+    direct_register_custom_op(
+        op_name="muse_spark_mul_tanh_soft_cap_cutedsl",
+        op_func=muse_spark_mul_tanh_soft_cap,
+        fake_impl=_soft_cap_fake,
+        mutates_args=["out"],
     )
-    args = parser.parse_args()
-
-    shapes = [
-        (128,),
-        (3, 128),
-        (3, 129),
-        (2, 4096),
-        (1, 202048),
-        (8, 202048),
-        (32, 202048),
-        (0,),
-        (0, 129),
-        (3, 0),
-        (1,),
-        (3,),
-        (4,),
-        (5,),
-        (2, 3, 129),
-        (2, 4097),
-    ]
-    dtypes = [torch.float16, torch.bfloat16, torch.float32]
-
-    model_multiplier = 0.17677669529663687
-    model_temperature = 20.0
-
-    # Case fields:
-    # shape, dtype, input offset, output offset, values, multiplier, temperature
-    cases: list[tuple[tuple[int, ...], torch.dtype, int, int, str, float, float]]
-    if args.mode == "profile":
-        cases = [
-            (
-                (8, 202048),
-                torch.float32,
-                0,
-                0,
-                "normal",
-                model_multiplier,
-                model_temperature,
-            )
-        ]
-    else:
-        cases = [
-            (
-                shape,
-                dtype,
-                0,
-                0,
-                "normal",
-                model_multiplier,
-                model_temperature,
-            )
-            for shape, dtype in product(shapes, dtypes)
-        ]
-
-    if args.mode == "check":
-        # Independently offset input and output addresses.
-        cases.extend(
-            (
-                (3, 128),
-                dtype,
-                input_offset,
-                output_offset,
-                "normal",
-                model_multiplier,
-                model_temperature,
-            )
-            for dtype in dtypes
-            for input_offset, output_offset in [(1, 0), (0, 1), (1, 1)]
-        )
-
-        # Numerical coverage on both vectorized and scalar paths.
-        cases.extend(
-            (shape, dtype, 0, 0, values, multiplier, temperature)
-            for shape, dtype, values, multiplier, temperature in product(
-                [(3, 128), (3, 129)],
-                dtypes,
-                ["zeros", "tiny", "normal", "large"],
-                [0.0, 1.0, model_multiplier, -1.0],
-                [0.25, 1.0, model_temperature],
-            )
-        )
-
-    if args.mode == "bench":
-        from triton.testing import do_bench_cudagraph
-
-    for (
-        shape,
-        dtype,
-        input_offset,
-        output_offset,
-        values,
-        multiplier,
-        soft_cap_temp,
-    ) in cases:
-        numel = math.prod(shape)
-
-        input_storage = torch.randn(
-            numel + input_offset,
-            device="cuda",
-            dtype=dtype,
-        )
-        x = input_storage[input_offset:].view(shape)
-
-        if values == "zeros":
-            x.zero_()
-        elif values == "tiny":
-            x.mul_(1e-4)
-        elif values == "large":
-            x.mul_(1000.0)
-
-        output_storage = torch.full(
-            (numel + output_offset,),
-            float("nan"),
-            device="cuda",
-            dtype=torch.float32,
-        )
-        out_cute = output_storage[output_offset:].view(shape)
-        out_cuda = torch.empty_like(x, dtype=torch.float32)
-
-        def run_cuda(
-            out_cuda=out_cuda,
-            x=x,
-            multiplier=multiplier,
-            soft_cap_temp=soft_cap_temp,
-        ):
-            torch.ops._C.muse_spark_mul_tanh_soft_cap(
-                out_cuda, x, multiplier, soft_cap_temp
-            )
-
-        def run_cute(
-            out_cute=out_cute,
-            x=x,
-            multiplier=multiplier,
-            soft_cap_temp=soft_cap_temp,
-        ):
-            muse_spark_mul_tanh_soft_cap(out_cute, x, multiplier, soft_cap_temp)
-
-        warmup_iterations = 1 if args.mode == "check" else 10
-        for _ in range(warmup_iterations):
-            run_cuda()
-            run_cute()
-
-        torch.accelerator.synchronize()
-
-        # Match the native launcher's conversion of both scalars to FP32.
-        multiplier_fp32 = torch.tensor(multiplier, device=x.device, dtype=torch.float32)
-        temperature_fp32 = torch.tensor(
-            soft_cap_temp, device=x.device, dtype=torch.float32
-        )
-        expected = temperature_fp32 * torch.tanh(
-            x.float() * multiplier_fp32 / temperature_fp32
-        )
-
-        label = (
-            f"{str(shape):14} {str(dtype):16} "
-            f"offsets=({input_offset},{output_offset}) "
-            f"values={values} "
-            f"multiplier={multiplier:g} temperature={soft_cap_temp:g}"
-        )
-
-        torch.testing.assert_close(
-            out_cute,
-            out_cuda,
-            msg=f"{label}: CuTe vs CUDA",
-        )
-        torch.testing.assert_close(
-            out_cute,
-            expected,
-            msg=f"{label}: CuTe vs PyTorch",
-        )
-
-        if args.mode == "check":
-            print(f"{label} passed")
-
-        elif args.mode == "bench":
-            cuda_ms = do_bench_cudagraph(run_cuda, rep=100)
-            cute_ms = do_bench_cudagraph(run_cute, rep=100)
-
-            print(
-                f"{label} "
-                f"CUDA={cuda_ms * 1000:.3f} us  "
-                f"CuTe={cute_ms * 1000:.3f} us  "
-                f"speedup={cuda_ms / cute_ms:.3f}x"
-            )
-
-        elif args.mode == "profile":
-            torch.cuda.cudart().cudaProfilerStart()
-            run_cuda()
-            run_cute()
-            torch.accelerator.synchronize()
-            torch.cuda.cudart().cudaProfilerStop()
