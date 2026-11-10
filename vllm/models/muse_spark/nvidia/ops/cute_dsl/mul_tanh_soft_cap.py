@@ -6,6 +6,7 @@ from typing import Any
 import torch
 
 import vllm._custom_ops  # noqa: F401
+from vllm.models.muse_spark.common.layers import MulTanhSoftCap
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -243,8 +244,6 @@ def _validate_inputs(
             "muse_spark_mul_tanh_soft_cap: soft_cap_temp must be nonzero"
         )
 
-    assert out.dtype == torch.float32
-
 
 def muse_spark_mul_tanh_soft_cap(
     out: torch.Tensor, input: torch.Tensor, multiplier: float, soft_cap_temp: float
@@ -261,7 +260,7 @@ def muse_spark_mul_tanh_soft_cap(
         and input.data_ptr() % VECTOR_ALIGNMENT_BYTES == 0
         and out.data_ptr() % VECTOR_ALIGNMENT_BYTES == 0
     )
-    elements_per_thread: int = 4 if vectorized else 1
+    elements_per_thread = ELEMENTS_PER_VECTOR if vectorized else 1
     work_per_row: int = (d + elements_per_thread - 1) // elements_per_thread
     blocks_to_cover: int = (work_per_row + THREADS_PER_BLOCK - 1) // THREADS_PER_BLOCK
     blocks_per_row: int = min(
@@ -329,3 +328,29 @@ if current_platform.is_cuda() and HAS_CUTEDSL:
         fake_impl=_soft_cap_fake,
         mutates_args=["out"],
     )
+
+
+def supports_mul_tanh_soft_cap(dtype: torch.dtype) -> bool:
+    return (
+        current_platform.is_cuda() and HAS_CUTEDSL and dtype in _TORCH_TO_CUTLASS_DTYPE
+    )
+
+
+def mul_tanh_soft_cap(
+    x: torch.Tensor,
+    multiplier: float,
+    soft_cap_temp: float,
+) -> torch.Tensor:
+    out = torch.empty_like(x, dtype=torch.float32)
+    torch.ops.vllm.muse_spark_mul_tanh_soft_cap_cutedsl(
+        out, x, multiplier, soft_cap_temp
+    )
+    return out
+
+
+class CuTeMulTanhSoftCap(MulTanhSoftCap):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.is_cuda and x.is_contiguous() and supports_mul_tanh_soft_cap(x.dtype):
+            return mul_tanh_soft_cap(x, self.multiplier, self.soft_cap_temp)
+
+        return super().forward(x)

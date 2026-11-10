@@ -12,7 +12,7 @@ import statistics
 import torch
 
 import vllm._custom_ops  # noqa: F401
-from vllm.models.muse_spark.nvidia.ops.cute_dsl.muse_spark_mul_tanh_soft_cap_kernel import (  # noqa: E501
+from vllm.models.muse_spark.nvidia.ops.cute_dsl.mul_tanh_soft_cap import (
     muse_spark_mul_tanh_soft_cap,
 )
 

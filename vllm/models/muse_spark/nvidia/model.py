@@ -121,6 +121,9 @@ from vllm.models.muse_spark.nvidia.muse_moe_runner import (
     MuseSparkMoEConfig,
     MuseSparkRoutedExperts,
 )
+from vllm.models.muse_spark.nvidia.ops.cute_dsl.mul_tanh_soft_cap import (
+    CuTeMulTanhSoftCap,
+)
 from vllm.models.muse_spark.nvidia.ops.cute_dsl.qk_norm import (
     qk_norm,
     supports_qk_norm,
@@ -2020,7 +2023,7 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
         self.output_soft_cap_temp = config.final_logit_softcapping
 
         self.mul_tanh_soft_cap = (
-            MulTanhSoftCap(
+            CuTeMulTanhSoftCap(
                 multiplier=self.metap_output_multiplier,
                 soft_cap_temp=self.output_soft_cap_temp,
             )

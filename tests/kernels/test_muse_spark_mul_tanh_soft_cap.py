@@ -12,7 +12,7 @@ import pytest
 import torch
 
 import vllm._custom_ops  # noqa: F401
-from vllm.models.muse_spark.nvidia.ops.cute_dsl.muse_spark_mul_tanh_soft_cap_kernel import (  # noqa: E501
+from vllm.models.muse_spark.nvidia.ops.cute_dsl.mul_tanh_soft_cap import (
     HAS_CUTEDSL,
     muse_spark_mul_tanh_soft_cap,
 )
@@ -149,3 +149,100 @@ def test_soft_cap_numerical_cases(
 
     out = torch.full_like(x, float("nan"), dtype=torch.float32)
     _assert_matches_references(x, out, multiplier, temperature)
+
+
+@pytest.mark.parametrize("dtype", DTYPES, ids=DTYPE_IDS)
+@pytest.mark.parametrize("width", [128, 129], ids=["vectorized", "scalar"])
+def test_soft_cap_custom_op_compile(dtype: torch.dtype, width: int) -> None:
+    torch.manual_seed(0)
+
+    def run_op(x: torch.Tensor) -> torch.Tensor:
+        out = torch.empty_like(x, dtype=torch.float32)
+        torch.ops.vllm.muse_spark_mul_tanh_soft_cap_cutedsl(
+            out, x, MODEL_MULTIPLIER, MODEL_TEMPERATURE
+        )
+        return out
+
+    x = torch.randn((3, width), device="cuda", dtype=dtype)
+
+    # Test registration and warm the CuTe kernel before compilation.
+    eager_out = run_op(x)
+    expected = MODEL_TEMPERATURE * torch.tanh(
+        x.float() * MODEL_MULTIPLIER / MODEL_TEMPERATURE
+    )
+    torch.testing.assert_close(eager_out, expected)
+
+    compiled_op = torch.compile(run_op, fullgraph=True)
+
+    # Reuse the compiled function with different input values.
+    for test_input in (x, -x):
+        out = compiled_op(test_input)
+        expected = MODEL_TEMPERATURE * torch.tanh(
+            test_input.float() * MODEL_MULTIPLIER / MODEL_TEMPERATURE
+        )
+        torch.testing.assert_close(out, expected)
+
+
+@pytest.mark.parametrize("dtype", DTYPES, ids=DTYPE_IDS)
+@pytest.mark.parametrize("path", ["cute", "fallback", "noncontiguous", "cpu"])
+def test_soft_cap_layer_dispatch(
+    dtype: torch.dtype,
+    path: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.models.muse_spark.nvidia.ops.cute_dsl import (
+        mul_tanh_soft_cap as soft_cap_module,
+    )
+
+    torch.manual_seed(0)
+    device = "cpu" if path == "cpu" else "cuda"
+    x = torch.randn((3, 128), device=device, dtype=dtype)
+    if path == "noncontiguous":
+        x = x.t()
+        assert not x.is_contiguous()
+
+    original_wrapper = soft_cap_module.mul_tanh_soft_cap
+    calls = []
+
+    def tracked_wrapper(x, multiplier, soft_cap_temp):
+        calls.append(True)
+        return original_wrapper(x, multiplier, soft_cap_temp)
+
+    monkeypatch.setattr(soft_cap_module, "mul_tanh_soft_cap", tracked_wrapper)
+    if path == "fallback":
+        monkeypatch.setattr(
+            soft_cap_module,
+            "supports_mul_tanh_soft_cap",
+            lambda dtype: False,
+        )
+
+    layer = soft_cap_module.CuTeMulTanhSoftCap(MODEL_MULTIPLIER, MODEL_TEMPERATURE)
+    out = layer(x)
+
+    expected = MODEL_TEMPERATURE * torch.tanh(
+        x.float() * MODEL_MULTIPLIER / MODEL_TEMPERATURE
+    )
+    torch.testing.assert_close(out, expected)
+    assert out.dtype == torch.float32
+    assert bool(calls) == (path == "cute")
+
+
+@pytest.mark.parametrize("dtype", DTYPES, ids=DTYPE_IDS)
+@pytest.mark.parametrize("width", [128, 129])
+def test_soft_cap_layer_compile(dtype: torch.dtype, width: int) -> None:
+    from vllm.models.muse_spark.nvidia.ops.cute_dsl.mul_tanh_soft_cap import (
+        CuTeMulTanhSoftCap,
+    )
+
+    torch.manual_seed(0)
+    layer = CuTeMulTanhSoftCap(MODEL_MULTIPLIER, MODEL_TEMPERATURE)
+    x = torch.randn((3, width), device="cuda", dtype=dtype)
+
+    layer(x)  # Warm the CuTe kernel before compiled execution.
+    compiled_layer = torch.compile(layer, fullgraph=True)
+
+    for test_input in (x, -x):
+        expected = MODEL_TEMPERATURE * torch.tanh(
+            test_input.float() * MODEL_MULTIPLIER / MODEL_TEMPERATURE
+        )
+        torch.testing.assert_close(compiled_layer(test_input), expected)
