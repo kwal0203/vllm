@@ -63,7 +63,7 @@ if HAS_CUTEDSL:
             input_tensor: cute.Tensor = cute.make_tensor(input_ptr, layout)
             out_tensor: cute.Tensor = cute.make_tensor(out_ptr, layout)
             if cutlass.const_expr(vectorized):
-                self.muse_spark_mul_tanh_soft_cap_kernel_vectorized(
+                self.kernel_vectorized(
                     out_tensor, input_tensor, d, multiplier, soft_cap_temp
                 ).launch(
                     grid=(num_tokens, blocks_per_row, 1),
@@ -71,7 +71,7 @@ if HAS_CUTEDSL:
                     stream=stream,
                 )
             else:
-                self.muse_spark_mul_tanh_soft_cap_kernel_scalar(
+                self.kernel_scalar(
                     out_tensor, input_tensor, d, multiplier, soft_cap_temp
                 ).launch(
                     grid=(num_tokens, blocks_per_row, 1),
@@ -80,7 +80,7 @@ if HAS_CUTEDSL:
                 )
 
         @cute.kernel
-        def muse_spark_mul_tanh_soft_cap_kernel_vectorized(
+        def kernel_vectorized(
             self,
             out: cute.Tensor,
             input: cute.Tensor,
@@ -132,7 +132,7 @@ if HAS_CUTEDSL:
                 cute.copy(store_atom, results, out4)
 
         @cute.kernel
-        def muse_spark_mul_tanh_soft_cap_kernel_scalar(
+        def kernel_scalar(
             self,
             out: cute.Tensor,
             input: cute.Tensor,
@@ -155,6 +155,21 @@ if HAS_CUTEDSL:
 
     _compile_cache: dict[Any, Any] = {}
 
+    def _make_ptrs(
+        dtype: Any,
+        out_addr: cute.Pointer,
+        input_addr: cute.Pointer,
+        *,
+        vectorized: bool,
+    ) -> tuple[Any, Any]:
+        align_kwargs: dict[str, Any] = (
+            {"assumed_align": VECTOR_ALIGNMENT_BYTES} if vectorized else {}
+        )
+        return (
+            make_ptr(Float32, out_addr, cute.AddressSpace.gmem, **align_kwargs),
+            make_ptr(dtype, input_addr, cute.AddressSpace.gmem, **align_kwargs),
+        )
+
     def _compiled_kernel(dtype: Any, vectorized: bool, stream: cuda.CUstream) -> Any:
         key: tuple[Any, bool, Any] = (
             dtype,
@@ -165,29 +180,12 @@ if HAS_CUTEDSL:
         input_ptr: cute.Pointer
         compiled: Any | None = _compile_cache.get(key)
         if compiled is None:
-            if vectorized:
-                # Vectorized launch
-                out_ptr = make_ptr(
-                    Float32,
-                    VECTOR_ALIGNMENT_BYTES,
-                    cute.AddressSpace.gmem,
-                    assumed_align=VECTOR_ALIGNMENT_BYTES,
-                )
-                input_ptr = make_ptr(
-                    dtype,
-                    VECTOR_ALIGNMENT_BYTES,
-                    cute.AddressSpace.gmem,
-                    assumed_align=VECTOR_ALIGNMENT_BYTES,
-                )
-            else:
-                # Scalar launch
-                out_ptr = make_ptr(
-                    Float32, VECTOR_ALIGNMENT_BYTES, cute.AddressSpace.gmem
-                )
-                input_ptr = make_ptr(
-                    dtype, VECTOR_ALIGNMENT_BYTES, cute.AddressSpace.gmem
-                )
-
+            out_ptr, input_ptr = _make_ptrs(
+                dtype,
+                VECTOR_ALIGNMENT_BYTES,
+                VECTOR_ALIGNMENT_BYTES,
+                vectorized=vectorized,
+            )
             compiled = cute.compile(
                 MulTanhSoftCapKernel(),
                 out_ptr,
@@ -248,6 +246,25 @@ def _validate_inputs(
 def muse_spark_mul_tanh_soft_cap(
     out: torch.Tensor, input: torch.Tensor, multiplier: float, soft_cap_temp: float
 ) -> None:
+    """Write ``soft_cap_temp * tanh(input * multiplier / soft_cap_temp)`` to out.
+
+    The computation runs in FP32 on the input device's current CUDA stream.
+    Use four-element vectors when the last dimension is divisible by four and
+    both base addresses are 16-byte aligned. Other valid inputs use the scalar
+    kernel. Empty inputs require no kernel launch.
+
+    Args:
+        out: Contiguous FP32 CUDA buffer with the same number of elements as
+            ``input``. Written in place.
+        input: Contiguous FP16, BF16, or FP32 CUDA tensor with at least one
+            dimension, on the same device as ``out``.
+        multiplier: Scale applied to the input before soft-capping.
+        soft_cap_temp: Nonzero soft-cap temperature.
+
+    Raises:
+        RuntimeError: If CuTe DSL is unavailable or an input requirement fails.
+
+    """
     _validate_inputs(out, input, soft_cap_temp)
 
     if input.numel() == 0:
@@ -268,38 +285,18 @@ def muse_spark_mul_tanh_soft_cap(
     )
 
     with torch.accelerator.device_index(input.device.index):
-        dtype: Any = _TORCH_TO_CUTLASS_DTYPE[input.dtype]
-        out_ptr: cute.Pointer
-        input_ptr: cute.Pointer
-        if vectorized:
-            # Vectorized launch
-            out_ptr = make_ptr(
-                Float32,
-                out.data_ptr(),
-                cute.AddressSpace.gmem,
-                assumed_align=VECTOR_ALIGNMENT_BYTES,
-            )
-            input_ptr = make_ptr(
-                dtype,
-                input.data_ptr(),
-                cute.AddressSpace.gmem,
-                assumed_align=VECTOR_ALIGNMENT_BYTES,
-            )
-        else:
-            # Scalar launch
-            out_ptr = make_ptr(
-                Float32,
-                out.data_ptr(),
-                cute.AddressSpace.gmem,
-            )
-            input_ptr = make_ptr(
-                dtype,
-                input.data_ptr(),
-                cute.AddressSpace.gmem,
-            )
+        out_ptr, input_ptr = _make_ptrs(
+            _TORCH_TO_CUTLASS_DTYPE[input.dtype],
+            out.data_ptr(),
+            input.data_ptr(),
+            vectorized=vectorized,
+        )
 
         stream: cuda.CUstream = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
-        compiled: Any = _compiled_kernel(dtype, vectorized, stream)
+        compiled: Any = _compiled_kernel(
+            _TORCH_TO_CUTLASS_DTYPE[input.dtype], vectorized, stream
+        )
+
         compiled(
             out_ptr,
             input_ptr,

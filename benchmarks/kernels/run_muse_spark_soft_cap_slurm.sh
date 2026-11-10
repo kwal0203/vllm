@@ -101,6 +101,8 @@ run_job() {
         echo "The checkout changed after submission. Commit and resubmit." >&2
         exit 1
     fi
+    module purge
+    module load cuda
     export PYTHONUNBUFFERED=1
     export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-4}
     git status --short --branch > "$run_dir/git-status.txt"
