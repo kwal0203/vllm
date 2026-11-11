@@ -147,11 +147,93 @@ if HAS_CUTEDSL:
 
             tid: Int32 = bidy * bdimx + tidx
             stride: Int32 = gdimy * bdimx
-            for i in range(tid, d, stride):
-                x: Float32 = input[bidx, i]
-                out[bidx, i] = soft_cap_temp * tanh(
-                    x * multiplier / soft_cap_temp, fastmath=False
-                )
+
+            input_row = input[bidx, None]
+            input_row_addr = input_row.iterator.toint()
+            input_element_bytes = input.element_type.width // 8
+
+            row_phase = (input_row_addr // input_element_bytes) % ELEMENTS_PER_VECTOR
+            skipped = Int32((ELEMENTS_PER_VECTOR - row_phase) % ELEMENTS_PER_VECTOR)
+            skipped = min(skipped, d)
+
+            out_row = out[bidx, None]
+            out_row_addr = out_row.iterator.toint()
+            out_element_bytes = out.element_type.width // 8
+            out_vec_bytes = ELEMENTS_PER_VECTOR * out_element_bytes
+
+            out_addr_after_skip = out_row_addr + skipped * out_element_bytes
+            can_vectorize = out_addr_after_skip % out_vec_bytes == 0
+
+            if can_vectorize:
+                num_vec = (d - skipped) // ELEMENTS_PER_VECTOR
+                tail_start = skipped + num_vec * ELEMENTS_PER_VECTOR
+
+                for i in range(tid, skipped, stride):
+                    x = Float32(input_row[i])
+                    out_row[i] = soft_cap_temp * tanh(
+                        x * multiplier / soft_cap_temp, fastmath=False
+                    )
+
+                if num_vec > 0:
+                    in_vec_bytes = ELEMENTS_PER_VECTOR * input_element_bytes
+                    in_vec_ptr = cute.make_ptr(
+                        input.element_type,
+                        input_row_addr + skipped * input_element_bytes,
+                        cute.AddressSpace.gmem,
+                        assumed_align=in_vec_bytes,
+                    )
+                    out_vec_ptr = cute.make_ptr(
+                        out.element_type,
+                        out_addr_after_skip,
+                        cute.AddressSpace.gmem,
+                        assumed_align=out_vec_bytes,
+                    )
+
+                    vec_layout = cute.make_layout(
+                        (ELEMENTS_PER_VECTOR, num_vec), stride=(1, ELEMENTS_PER_VECTOR)
+                    )
+                    input_vectors = cute.make_tensor(in_vec_ptr, vec_layout)
+                    out_vectors = cute.make_tensor(out_vec_ptr, vec_layout)
+
+                    load_atom: cute.CopyAtom = cute.make_copy_atom(
+                        cute.nvgpu.CopyUniversalOp(),
+                        input.element_type,
+                        num_bits_per_copy=in_vec_bytes * 8,
+                    )
+                    store_atom: cute.CopyAtom = cute.make_copy_atom(
+                        cute.nvgpu.CopyUniversalOp(), Float32, num_bits_per_copy=128
+                    )
+
+                    loaded: cute.Tensor = cute.make_rmem_tensor(
+                        cute.make_layout(ELEMENTS_PER_VECTOR), input.element_type
+                    )
+                    results: cute.Tensor = cute.make_rmem_tensor(
+                        cute.make_layout(ELEMENTS_PER_VECTOR), Float32
+                    )
+
+                    for group in range(tid, num_vec, stride):
+                        input4 = input_vectors[None, group]
+                        out4 = out_vectors[None, group]
+
+                        cute.copy(load_atom, input4, loaded)
+                        for i in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
+                            x = Float32(loaded[i])
+                            results[i] = soft_cap_temp * tanh(
+                                x * multiplier / soft_cap_temp, fastmath=False
+                            )
+                        cute.copy(store_atom, results, out4)
+
+                for i in range(tail_start + tid, d, stride):
+                    x = Float32(input_row[i])
+                    out_row[i] = soft_cap_temp * tanh(
+                        x * multiplier / soft_cap_temp, fastmath=False
+                    )
+            else:
+                for i in range(tid, d, stride):
+                    x = Float32(input[bidx, i])
+                    out[bidx, i] = soft_cap_temp * tanh(
+                        x * multiplier / soft_cap_temp, fastmath=False
+                    )
 
     _compile_cache: dict[Any, Any] = {}
 
