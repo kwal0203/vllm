@@ -115,7 +115,9 @@ if HAS_CUTEDSL:
             input_row: cute.Tensor = input[bidx, None]
             out_row: cute.Tensor = out[bidx, None]
 
-            for group in range(tid, d // ELEMENTS_PER_VECTOR, stride):
+            group: int = tid
+            loop_end: int = d // ELEMENTS_PER_VECTOR
+            while group < loop_end:
                 input4: cute.Tensor = cute.local_tile(
                     input_row, (ELEMENTS_PER_VECTOR,), (group,)
                 )
@@ -130,6 +132,23 @@ if HAS_CUTEDSL:
                         x * multiplier / soft_cap_temp, fastmath=False
                     )
                 cute.copy(store_atom, results, out4)
+                group = group + stride
+
+            # for group in range(tid, d // ELEMENTS_PER_VECTOR, stride):
+            #     input4: cute.Tensor = cute.local_tile(
+            #         input_row, (ELEMENTS_PER_VECTOR,), (group,)
+            #     )
+            #     out4: cute.Tensor = cute.local_tile(
+            #         out_row, (ELEMENTS_PER_VECTOR,), (group,)
+            #     )
+
+            #     cute.copy(load_atom, input4, loaded)
+            #     for i in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
+            #         x: Float32 = loaded[i]
+            #         results[i] = soft_cap_temp * tanh(
+            #             x * multiplier / soft_cap_temp, fastmath=False
+            #         )
+            #     cute.copy(store_atom, results, out4)
 
         @cute.kernel
         def kernel_scalar(
@@ -170,11 +189,19 @@ if HAS_CUTEDSL:
                 num_vec = (d - skipped) // ELEMENTS_PER_VECTOR
                 tail_start = skipped + num_vec * ELEMENTS_PER_VECTOR
 
-                for i in range(tid, skipped, stride):
+                i: int = tid
+                while i < skipped:
                     x = Float32(input_row[i])
                     out_row[i] = soft_cap_temp * tanh(
                         x * multiplier / soft_cap_temp, fastmath=False
                     )
+                    i = i + stride
+
+                # for i in range(tid, skipped, stride):
+                #     x = Float32(input_row[i])
+                #     out_row[i] = soft_cap_temp * tanh(
+                #         x * multiplier / soft_cap_temp, fastmath=False
+                #     )
 
                 if num_vec > 0:
                     in_vec_bytes = ELEMENTS_PER_VECTOR * input_element_bytes
@@ -213,7 +240,8 @@ if HAS_CUTEDSL:
                         cute.make_layout(ELEMENTS_PER_VECTOR), Float32
                     )
 
-                    for group in range(tid, num_vec, stride):
+                    group: int = tid
+                    while group < num_vec:
                         input4 = input_vectors[None, group]
                         out4 = out_vectors[None, group]
 
@@ -224,18 +252,47 @@ if HAS_CUTEDSL:
                                 x * multiplier / soft_cap_temp, fastmath=False
                             )
                         cute.copy(store_atom, results, out4)
+                        group = group + stride
 
-                for i in range(tail_start + tid, d, stride):
+                    # for group in range(tid, num_vec, stride):
+                    #     input4 = input_vectors[None, group]
+                    #     out4 = out_vectors[None, group]
+
+                    #     cute.copy(load_atom, input4, loaded)
+                    #     for i in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
+                    #         x = Float32(loaded[i])
+                    #         results[i] = soft_cap_temp * tanh(
+                    #             x * multiplier / soft_cap_temp, fastmath=False
+                    #         )
+                    #     cute.copy(store_atom, results, out4)
+
+                i = tail_start + tid
+                while i < d:
                     x = Float32(input_row[i])
                     out_row[i] = soft_cap_temp * tanh(
                         x * multiplier / soft_cap_temp, fastmath=False
                     )
+                    i = i + stride
+
+                # for i in range(tail_start + tid, d, stride):
+                #     x = Float32(input_row[i])
+                #     out_row[i] = soft_cap_temp * tanh(
+                #         x * multiplier / soft_cap_temp, fastmath=False
+                #     )
             else:
-                for i in range(tid, d, stride):
+                i = tid
+                while i < d:
                     x = Float32(input[bidx, i])
                     out[bidx, i] = soft_cap_temp * tanh(
                         x * multiplier / soft_cap_temp, fastmath=False
                     )
+                    i = i + stride
+
+                # for i in range(tid, d, stride):
+                #     x = Float32(input[bidx, i])
+                #     out[bidx, i] = soft_cap_temp * tanh(
+                #         x * multiplier / soft_cap_temp, fastmath=False
+                #     )
 
     _compile_cache: dict[Any, Any] = {}
 
