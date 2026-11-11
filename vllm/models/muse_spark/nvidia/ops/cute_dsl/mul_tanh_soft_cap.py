@@ -152,9 +152,11 @@ if HAS_CUTEDSL:
             input_row_addr = input_row.iterator.toint()
             input_element_bytes = input.element_type.width // 8
 
-            row_phase = (input_row_addr // input_element_bytes) % ELEMENTS_PER_VECTOR
-            skipped = Int32((ELEMENTS_PER_VECTOR - row_phase) % ELEMENTS_PER_VECTOR)
-            skipped = min(skipped, d)
+            in_vec_bytes = ELEMENTS_PER_VECTOR * input_element_bytes
+            alignment_mask = in_vec_bytes - 1
+            misalignment_bytes = Int32(input_row_addr & alignment_mask)
+            skipped_bytes = (in_vec_bytes - misalignment_bytes) & alignment_mask
+            skipped = min(skipped_bytes // input_element_bytes, d)
 
             out_row = out[bidx, None]
             out_row_addr = out_row.iterator.toint()
