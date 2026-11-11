@@ -281,6 +281,7 @@ if HAS_CUTEDSL:
                 Float32(1.0),  # soft_cap_temp
                 vectorized,
                 stream,
+                options="--ptxas-options -maxrregcount=32",
             )
             _compile_cache[key] = compiled
         return compiled
