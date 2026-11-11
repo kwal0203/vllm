@@ -359,8 +359,7 @@ def muse_spark_mul_tanh_soft_cap(
         and input.data_ptr() % VECTOR_ALIGNMENT_BYTES == 0
         and out.data_ptr() % VECTOR_ALIGNMENT_BYTES == 0
     )
-    elements_per_thread = ELEMENTS_PER_VECTOR if vectorized else 1
-    work_per_row: int = (d + elements_per_thread - 1) // elements_per_thread
+    work_per_row: int = (d + ELEMENTS_PER_VECTOR - 1) // ELEMENTS_PER_VECTOR
     blocks_to_cover: int = (work_per_row + THREADS_PER_BLOCK - 1) // THREADS_PER_BLOCK
     blocks_per_row: int = min(
         max(TARGET_BLOCKS // num_tokens, 1), max(blocks_to_cover, 1)
