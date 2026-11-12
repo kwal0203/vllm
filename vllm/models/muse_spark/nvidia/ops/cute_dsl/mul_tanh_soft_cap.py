@@ -206,20 +206,22 @@ if HAS_CUTEDSL:
                 tail_start = Int32(skipped + (num_vec << 2))
 
                 i: int = tid
-                while i < skipped:
+                # while i < skipped:
+                if i < skipped:
                     x = Float32(input_row[i])
                     out_row[i] = soft_cap_temp * tanh(
                         x * multiplier / soft_cap_temp, fastmath=False
                     )
-                    i = i + stride
+                    # i = i + stride
 
                 i = tail_start + tid
-                while i < d:
+                # while i < d:
+                if i < d:
                     x = Float32(input_row[i])
                     out_row[i] = soft_cap_temp * tanh(
                         x * multiplier / soft_cap_temp, fastmath=False
                     )
-                    i = i + stride
+                    # i = i + stride
 
                 if num_vec > 0:
                     in_vec_ptr = cute.make_ptr(
@@ -258,8 +260,8 @@ if HAS_CUTEDSL:
                     )
 
                     group: int = tid
-                    # while group < num_vec:
-                    if group < num_vec:
+                    while group < num_vec:
+                        # if group < num_vec:
                         cute.copy(load_atom, input_vectors[None, group], loaded)
                         for k in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
                             x = Float32(loaded[k])
@@ -267,7 +269,7 @@ if HAS_CUTEDSL:
                                 x * multiplier / soft_cap_temp, fastmath=False
                             )
                         cute.copy(store_atom, results, out_vectors[None, group])
-                        # group = group + stride
+                        group = group + stride
 
             else:
                 i = tid
