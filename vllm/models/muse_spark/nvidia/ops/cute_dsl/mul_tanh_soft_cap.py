@@ -214,14 +214,14 @@ if HAS_CUTEDSL:
                     )
                     # i = i + stride
 
-                i = tail_start + tid
-                # while i < d:
-                if i < d:
-                    x = Float32(input_row[i])
-                    out_row[i] = soft_cap_temp * tanh(
-                        x * multiplier / soft_cap_temp, fastmath=False
-                    )
-                    # i = i + stride
+                # i = tail_start + tid
+                # # while i < d:
+                # if i < d:
+                #     x = Float32(input_row[i])
+                #     out_row[i] = soft_cap_temp * tanh(
+                #         x * multiplier / soft_cap_temp, fastmath=False
+                #     )
+                #     # i = i + stride
 
                 if num_vec > 0:
                     in_vec_ptr = cute.make_ptr(
@@ -270,6 +270,15 @@ if HAS_CUTEDSL:
                             )
                         cute.copy(store_atom, results, out_vectors[None, group])
                         # group = group + stride
+
+                i = tail_start + tid
+                # while i < d:
+                if i < d:
+                    x = Float32(input_row[i])
+                    out_row[i] = soft_cap_temp * tanh(
+                        x * multiplier / soft_cap_temp, fastmath=False
+                    )
+                    # i = i + stride
 
             else:
                 i = tid
