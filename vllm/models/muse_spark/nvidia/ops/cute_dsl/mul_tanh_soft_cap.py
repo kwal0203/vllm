@@ -194,7 +194,8 @@ if HAS_CUTEDSL:
             out_vec_bytes = ELEMENTS_PER_VECTOR * out_element_bytes
 
             out_addr_after_skip = out_row_addr + skipped * out_element_bytes
-            can_vectorize = out_addr_after_skip % out_vec_bytes == 0
+            # can_vectorize = out_addr_after_skip % out_vec_bytes == 0
+            can_vectorize = Int32(out_addr_after_skip & (out_vec_bytes - 1)) == Int32(0)
 
             if can_vectorize:
                 num_vec = (d - skipped) // ELEMENTS_PER_VECTOR
