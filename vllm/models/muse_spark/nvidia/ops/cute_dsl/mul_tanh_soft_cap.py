@@ -127,11 +127,21 @@ if HAS_CUTEDSL:
 
                 cute.copy(load_atom, input4, loaded)
                 # for i in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
-                for i in range(ELEMENTS_PER_VECTOR):
-                    x: Float32 = loaded[i]
-                    results[i] = soft_cap_temp * tanh(
+                j = 0
+                j_end = ELEMENTS_PER_VECTOR
+                while j < j_end:
+                    x: Float32 = loaded[j]
+                    results[j] = soft_cap_temp * tanh(
                         x * multiplier / soft_cap_temp, fastmath=False
                     )
+                    j = j + 1
+
+                # for i in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
+                # for i in range(ELEMENTS_PER_VECTOR):
+                #     x: Float32 = loaded[i]
+                #     results[i] = soft_cap_temp * tanh(
+                #         x * multiplier / soft_cap_temp, fastmath=False
+                #     )
                 cute.copy(store_atom, results, out4)
                 group = group + stride
 
