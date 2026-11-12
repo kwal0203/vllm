@@ -16,7 +16,7 @@ try:
     import cutlass
     import cutlass.cute as cute
     from cuda.bindings import driver as cuda
-    from cutlass import Float32, Int32
+    from cutlass import Float32, Int32, Int64
     from cutlass.cute.math import tanh
     from cutlass.cute.runtime import make_ptr
 except ImportError:
@@ -59,12 +59,17 @@ if HAS_CUTEDSL:
             if cutlass.const_expr(vectorized):
                 d = cute.assume(d, divby=ELEMENTS_PER_VECTOR)
 
-            layout: cute.Layout = cute.make_layout((num_tokens, d), stride=(d, 1))
-            input_tensor: cute.Tensor = cute.make_tensor(input_ptr, layout)
-            out_tensor: cute.Tensor = cute.make_tensor(out_ptr, layout)
+            # layout: cute.Layout = cute.make_layout((num_tokens, d), stride=(d, 1))
+            # input_tensor: cute.Tensor = cute.make_tensor(input_ptr, layout)
+            # out_tensor: cute.Tensor = cute.make_tensor(out_ptr, layout)
             if cutlass.const_expr(vectorized):
                 self.kernel_vectorized(
-                    out_tensor, input_tensor, d, multiplier, soft_cap_temp
+                    # out_tensor, input_tensor, d, multiplier, soft_cap_temp
+                    out_ptr,
+                    input_ptr,
+                    d,
+                    multiplier,
+                    soft_cap_temp,
                 ).launch(
                     grid=(num_tokens, blocks_per_row, 1),
                     block=(THREADS_PER_BLOCK, 1, 1),
@@ -72,7 +77,12 @@ if HAS_CUTEDSL:
                 )
             else:
                 self.kernel_scalar(
-                    out_tensor, input_tensor, d, multiplier, soft_cap_temp
+                    # out_tensor, input_tensor, d, multiplier, soft_cap_temp
+                    out_ptr,
+                    input_ptr,
+                    d,
+                    multiplier,
+                    soft_cap_temp,
                 ).launch(
                     grid=(num_tokens, blocks_per_row, 1),
                     block=(THREADS_PER_BLOCK, 1, 1),
@@ -82,8 +92,8 @@ if HAS_CUTEDSL:
         @cute.kernel
         def kernel_vectorized(
             self,
-            out: cute.Tensor,
-            input: cute.Tensor,
+            out: cute.Pointer,
+            input: cute.Pointer,
             d: Int32,
             multiplier: Float32,
             soft_cap_temp: Float32,
@@ -93,56 +103,69 @@ if HAS_CUTEDSL:
             bdimx, _, _ = cute.arch.block_dim()
             _, gdimy, _ = cute.arch.grid_dim()
 
-            tid: Int32 = bidy * bdimx + tidx
-            stride: Int32 = gdimy * bdimx
+            input_dtype = input.dtype
+            input_vector_bits = ELEMENTS_PER_VECTOR * input_dtype.width
+            row_offset = Int64(bidx) * Int64(d)
+            num_vec = d >> 2  # Four elements per vector.
 
-            load_atom: cute.CopyAtom = cute.make_copy_atom(
+            # Each column of this layout is one contiguous vector.
+            vec_layout = cute.make_layout(
+                (ELEMENTS_PER_VECTOR, num_vec),
+                stride=(1, ELEMENTS_PER_VECTOR),
+            )
+
+            input_row_ptr = cute.make_ptr(
+                input_dtype,
+                (input + row_offset).toint(),
+                cute.AddressSpace.gmem,
+                assumed_align=input_vector_bits // 8,
+            )
+            out_row_ptr = cute.make_ptr(
+                Float32,
+                (out + row_offset).toint(),
+                cute.AddressSpace.gmem,
+                assumed_align=VECTOR_ALIGNMENT_BYTES,
+            )
+            input_vectors = cute.make_tensor(input_row_ptr, vec_layout)
+            out_vectors = cute.make_tensor(out_row_ptr, vec_layout)
+
+            load_atom = cute.make_copy_atom(
                 cute.nvgpu.CopyUniversalOp(),
-                input.element_type,
-                num_bits_per_copy=ELEMENTS_PER_VECTOR * input.element_type.width,
+                input_dtype,
+                num_bits_per_copy=input_vector_bits,
             )
-            store_atom: cute.CopyAtom = cute.make_copy_atom(
-                cute.nvgpu.CopyUniversalOp(), Float32, num_bits_per_copy=128
-            )
-
-            loaded: cute.Tensor = cute.make_rmem_tensor(
-                cute.make_layout(ELEMENTS_PER_VECTOR), input.element_type
-            )
-            results: cute.Tensor = cute.make_rmem_tensor(
-                cute.make_layout(ELEMENTS_PER_VECTOR), Float32
+            store_atom = cute.make_copy_atom(
+                cute.nvgpu.CopyUniversalOp(),
+                Float32,
+                num_bits_per_copy=ELEMENTS_PER_VECTOR * Float32.width,
             )
 
-            input_row: cute.Tensor = input[bidx, None]
-            out_row: cute.Tensor = out[bidx, None]
+            fragment_layout = cute.make_layout(ELEMENTS_PER_VECTOR)
+            loaded = cute.make_rmem_tensor(fragment_layout, input_dtype)
+            results = cute.make_rmem_tensor(fragment_layout, Float32)
 
-            group: int = tid
-            # loop_end: int = d // ELEMENTS_PER_VECTOR
-            loop_end = Int32(d >> 2)
-            while group < loop_end:
-                input4: cute.Tensor = cute.local_tile(
-                    input_row, (ELEMENTS_PER_VECTOR,), (group,)
-                )
-                out4: cute.Tensor = cute.local_tile(
-                    out_row, (ELEMENTS_PER_VECTOR,), (group,)
-                )
+            group = bidy * bdimx + tidx
+            stride = gdimy * bdimx
+            while group < num_vec:
+                cute.copy(load_atom, input_vectors[None, group], loaded)
 
-                cute.copy(load_atom, input4, loaded)
-                j = 0
-                while j < ELEMENTS_PER_VECTOR:
-                    x: Float32 = loaded[j]
+                for j in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
+                    x = Float32(loaded[j])
                     results[j] = soft_cap_temp * tanh(
-                        x * multiplier / soft_cap_temp, fastmath=False
+                        x * multiplier / soft_cap_temp,
+                        fastmath=False,
                     )
-                    j = j + 1
 
-                cute.copy(store_atom, results, out4)
+                cute.copy(store_atom, results, out_vectors[None, group])
                 group = group + stride
 
         @cute.kernel
         def kernel_scalar(
             self,
-            out: cute.Tensor,
-            input: cute.Tensor,
+            # out: cute.Tensor,
+            # input: cute.Tensor,
+            out: cute.Pointer,
+            input: cute.Pointer,
             d: Int32,
             multiplier: Float32,
             soft_cap_temp: Float32,
@@ -155,9 +178,15 @@ if HAS_CUTEDSL:
             tid: Int32 = bidy * bdimx + tidx
             stride: Int32 = gdimy * bdimx
 
-            input_row = input[bidx, None]
+            row_offset = Int64(bidx) * Int64(d)
+            row_layout = cute.make_layout(d)
+
+            input_row = cute.make_tensor(input + row_offset, row_layout)
+            out_row = cute.make_tensor(out + row_offset, row_layout)
+
+            # input_row = input[bidx, None]
             input_row_addr = input_row.iterator.toint()
-            input_element_bytes = input.element_type.width // 8
+            input_element_bytes = input.dtype.width // 8
 
             in_vec_bytes = ELEMENTS_PER_VECTOR * input_element_bytes
             alignment_mask = in_vec_bytes - 1
@@ -165,19 +194,14 @@ if HAS_CUTEDSL:
             skipped_bytes = (in_vec_bytes - misalignment_bytes) & alignment_mask
             skipped = min(skipped_bytes // input_element_bytes, d)
 
-            out_row = out[bidx, None]
+            # out_row = out[bidx, None]
             out_row_addr = out_row.iterator.toint()
-            out_element_bytes = out.element_type.width // 8
+            out_element_bytes = out.dtype.width // 8
             out_vec_bytes = ELEMENTS_PER_VECTOR * out_element_bytes
 
             out_addr_after_skip = out_row_addr + skipped * out_element_bytes
-            # can_vectorize = out_addr_after_skip % out_vec_bytes == 0
             can_vectorize = Int32(out_addr_after_skip & (out_vec_bytes - 1)) == Int32(0)
-
             if can_vectorize:
-                # num_vec = (d - skipped) // ELEMENTS_PER_VECTOR
-                # tail_start = skipped + num_vec * ELEMENTS_PER_VECTOR
-
                 num_vec = Int32((d - skipped) >> 2)  # elements per vector == 4
                 tail_start = Int32(skipped + (num_vec << 2))
 
@@ -197,21 +221,15 @@ if HAS_CUTEDSL:
                     )
                     i = i + stride
 
-                # for i in range(tid, skipped, stride):
-                #     x = Float32(input_row[i])
-                #     out_row[i] = soft_cap_temp * tanh(
-                #         x * multiplier / soft_cap_temp, fastmath=False
-                #     )
-
                 if num_vec > 0:
                     in_vec_ptr = cute.make_ptr(
-                        input.element_type,
+                        input.dtype,
                         input_row_addr + skipped * input_element_bytes,
                         cute.AddressSpace.gmem,
                         assumed_align=in_vec_bytes,
                     )
                     out_vec_ptr = cute.make_ptr(
-                        out.element_type,
+                        out.dtype,
                         out_addr_after_skip,
                         cute.AddressSpace.gmem,
                         assumed_align=out_vec_bytes,
@@ -225,7 +243,7 @@ if HAS_CUTEDSL:
 
                     load_atom: cute.CopyAtom = cute.make_copy_atom(
                         cute.nvgpu.CopyUniversalOp(),
-                        input.element_type,
+                        input.dtype,
                         num_bits_per_copy=in_vec_bytes * 8,
                     )
                     store_atom: cute.CopyAtom = cute.make_copy_atom(
@@ -233,7 +251,7 @@ if HAS_CUTEDSL:
                     )
 
                     loaded: cute.Tensor = cute.make_rmem_tensor(
-                        cute.make_layout(ELEMENTS_PER_VECTOR), input.element_type
+                        cute.make_layout(ELEMENTS_PER_VECTOR), input.dtype
                     )
                     results: cute.Tensor = cute.make_rmem_tensor(
                         cute.make_layout(ELEMENTS_PER_VECTOR), Float32
@@ -241,10 +259,6 @@ if HAS_CUTEDSL:
 
                     group: int = tid
                     while group < num_vec:
-                        # input4 = input_vectors[None, group]
-                        # out4 = out_vectors[None, group]
-                        # cute.copy(load_atom, input4, loaded)
-
                         cute.copy(load_atom, input_vectors[None, group], loaded)
                         for k in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
                             x = Float32(loaded[k])
@@ -254,51 +268,6 @@ if HAS_CUTEDSL:
                         cute.copy(store_atom, results, out_vectors[None, group])
                         group = group + stride
 
-                        # for i in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
-                        #     x = Float32(loaded[i])
-                        #     results[i] = soft_cap_temp * tanh(
-                        #         x * multiplier / soft_cap_temp, fastmath=False
-                        #     )
-
-                        # cute.copy(store_atom, results, out4)
-                        # group = group + stride
-
-                    # for group in range(tid, num_vec, stride):
-                    #     input4 = input_vectors[None, group]
-                    #     out4 = out_vectors[None, group]
-
-                    #     cute.copy(load_atom, input4, loaded)
-                    #     for i in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
-                    #         x = Float32(loaded[i])
-                    #         results[i] = soft_cap_temp * tanh(
-                    #             x * multiplier / soft_cap_temp, fastmath=False
-                    #         )
-                    #     cute.copy(store_atom, results, out4)
-
-                # rem_len = Int32(d - skipped)
-                # tail_in = cute.make_tensor(in_vec_ptr, cute.make_layout(rem_len))
-                # tail_out = cute.make_tensor(out_vec_ptr, cute.make_layout(rem_len))
-                # t_idx = Int32((num_vec << 2) + tid)
-                # while t_idx < rem_len:
-                #     x = Float32(tail_in[t_idx])
-                #     tail_out[t_idx] = soft_cap_temp * tanh(
-                #         x * multiplier / soft_cap_temp, fastmath=False
-                #     )
-                #     t_idx = t_idx + stride
-
-                # i = tail_start + tid
-                # while i < d:
-                #     x = Float32(input_row[i])
-                #     out_row[i] = soft_cap_temp * tanh(
-                #         x * multiplier / soft_cap_temp, fastmath=False
-                #     )
-                #     i = i + stride
-
-                # for i in range(tail_start + tid, d, stride):
-                #     x = Float32(input_row[i])
-                #     out_row[i] = soft_cap_temp * tanh(
-                #         x * multiplier / soft_cap_temp, fastmath=False
-                #     )
             else:
                 i = tid
                 while i < d:
@@ -307,12 +276,6 @@ if HAS_CUTEDSL:
                         x * multiplier / soft_cap_temp, fastmath=False
                     )
                     i = i + stride
-
-                # for i in range(tid, d, stride):
-                #     x = Float32(input[bidx, i])
-                #     out[bidx, i] = soft_cap_temp * tanh(
-                #         x * multiplier / soft_cap_temp, fastmath=False
-                #     )
 
     _compile_cache: dict[Any, Any] = {}
 
