@@ -198,8 +198,10 @@ if HAS_CUTEDSL:
             can_vectorize = Int32(out_addr_after_skip & (out_vec_bytes - 1)) == Int32(0)
 
             if can_vectorize:
-                num_vec = (d - skipped) // ELEMENTS_PER_VECTOR
-                tail_start = skipped + num_vec * ELEMENTS_PER_VECTOR
+                # num_vec = (d - skipped) // ELEMENTS_PER_VECTOR
+                # tail_start = skipped + num_vec * ELEMENTS_PER_VECTOR
+
+                # tail_start = Int32(skipped + (num_vec << 2))
 
                 i: int = tid
                 while i < skipped:
@@ -215,20 +217,33 @@ if HAS_CUTEDSL:
                 #         x * multiplier / soft_cap_temp, fastmath=False
                 #     )
 
+                in_vec_ptr = cute.make_ptr(
+                    input.element_type,
+                    input_row_addr + skipped * input_element_bytes,
+                    cute.AddressSpace.gmem,
+                    assumed_align=in_vec_bytes,
+                )
+                out_vec_ptr = cute.make_ptr(
+                    out.element_type,
+                    out_addr_after_skip,
+                    cute.AddressSpace.gmem,
+                    assumed_align=out_vec_bytes,
+                )
+
+                num_vec = Int32((d - skipped) >> 2)
                 if num_vec > 0:
-                    in_vec_bytes = ELEMENTS_PER_VECTOR * input_element_bytes
-                    in_vec_ptr = cute.make_ptr(
-                        input.element_type,
-                        input_row_addr + skipped * input_element_bytes,
-                        cute.AddressSpace.gmem,
-                        assumed_align=in_vec_bytes,
-                    )
-                    out_vec_ptr = cute.make_ptr(
-                        out.element_type,
-                        out_addr_after_skip,
-                        cute.AddressSpace.gmem,
-                        assumed_align=out_vec_bytes,
-                    )
+                    # in_vec_ptr = cute.make_ptr(
+                    #     input.element_type,
+                    #     input_row_addr + skipped * input_element_bytes,
+                    #     cute.AddressSpace.gmem,
+                    #     assumed_align=in_vec_bytes,
+                    # )
+                    # out_vec_ptr = cute.make_ptr(
+                    #     out.element_type,
+                    #     out_addr_after_skip,
+                    #     cute.AddressSpace.gmem,
+                    #     assumed_align=out_vec_bytes,
+                    # )
 
                     vec_layout = cute.make_layout(
                         (ELEMENTS_PER_VECTOR, num_vec), stride=(1, ELEMENTS_PER_VECTOR)
@@ -254,17 +269,18 @@ if HAS_CUTEDSL:
 
                     group: int = tid
                     while group < num_vec:
-                        input4 = input_vectors[None, group]
-                        out4 = out_vectors[None, group]
+                        # input4 = input_vectors[None, group]
+                        # out4 = out_vectors[None, group]
+                        # cute.copy(load_atom, input4, loaded)
 
-                        cute.copy(load_atom, input4, loaded)
-                        i = 0
-                        while i < ELEMENTS_PER_VECTOR:
-                            x = Float32(loaded[i])
-                            results[i] = soft_cap_temp * tanh(
+                        cute.copy(load_atom, input_vectors[None, group], loaded)
+                        for k in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
+                            x = Float32(loaded[k])
+                            results[k] = soft_cap_temp * tanh(
                                 x * multiplier / soft_cap_temp, fastmath=False
                             )
-                            i = i + 1
+                        cute.copy(store_atom, results, out_vectors[None, group])
+                        group = group + stride
 
                         # for i in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
                         #     x = Float32(loaded[i])
@@ -272,8 +288,8 @@ if HAS_CUTEDSL:
                         #         x * multiplier / soft_cap_temp, fastmath=False
                         #     )
 
-                        cute.copy(store_atom, results, out4)
-                        group = group + stride
+                        # cute.copy(store_atom, results, out4)
+                        # group = group + stride
 
                     # for group in range(tid, num_vec, stride):
                     #     input4 = input_vectors[None, group]
@@ -287,13 +303,24 @@ if HAS_CUTEDSL:
                     #         )
                     #     cute.copy(store_atom, results, out4)
 
-                i = tail_start + tid
-                while i < d:
-                    x = Float32(input_row[i])
-                    out_row[i] = soft_cap_temp * tanh(
+                rem_len = Int32(d - skipped)
+                tail_in = cute.make_tensor(in_vec_ptr, cute.make_layout(rem_len))
+                tail_out = cute.make_tensor(out_vec_ptr, cute.make_layout(rem_len))
+                t_idx = Int32((num_vec << 2) + tid)
+                while t_idx < rem_len:
+                    x = Float32(tail_in[t_idx])
+                    tail_out[t_idx] = soft_cap_temp * tanh(
                         x * multiplier / soft_cap_temp, fastmath=False
                     )
-                    i = i + stride
+                    t_idx = t_idx + stride
+
+                # i = tail_start + tid
+                # while i < d:
+                #     x = Float32(input_row[i])
+                #     out_row[i] = soft_cap_temp * tanh(
+                #         x * multiplier / soft_cap_temp, fastmath=False
+                #     )
+                #     i = i + stride
 
                 # for i in range(tail_start + tid, d, stride):
                 #     x = Float32(input_row[i])
@@ -303,8 +330,8 @@ if HAS_CUTEDSL:
             else:
                 i = tid
                 while i < d:
-                    x = Float32(input[bidx, i])
-                    out[bidx, i] = soft_cap_temp * tanh(
+                    x = Float32(input_row[i])
+                    out_row[i] = soft_cap_temp * tanh(
                         x * multiplier / soft_cap_temp, fastmath=False
                     )
                     i = i + stride
