@@ -260,8 +260,8 @@ if HAS_CUTEDSL:
                     )
 
                     group: int = tid
-                    while group < num_vec:
-                        # if group < num_vec:
+                    # while group < num_vec:
+                    if group < num_vec:
                         cute.copy(load_atom, input_vectors[None, group], loaded)
                         for k in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
                             x = Float32(loaded[k])
@@ -269,7 +269,7 @@ if HAS_CUTEDSL:
                                 x * multiplier / soft_cap_temp, fastmath=False
                             )
                         cute.copy(store_atom, results, out_vectors[None, group])
-                        group = group + stride
+                        # group = group + stride
 
             else:
                 i = tid
