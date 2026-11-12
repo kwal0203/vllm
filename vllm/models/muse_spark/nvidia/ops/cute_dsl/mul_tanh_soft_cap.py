@@ -116,7 +116,8 @@ if HAS_CUTEDSL:
             out_row: cute.Tensor = out[bidx, None]
 
             group: int = tid
-            loop_end: int = d // ELEMENTS_PER_VECTOR
+            # loop_end: int = d // ELEMENTS_PER_VECTOR
+            loop_end = Int32(d >> 2)
             while group < loop_end:
                 input4: cute.Tensor = cute.local_tile(
                     input_row, (ELEMENTS_PER_VECTOR,), (group,)
@@ -126,40 +127,16 @@ if HAS_CUTEDSL:
                 )
 
                 cute.copy(load_atom, input4, loaded)
-                # for i in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
                 j = 0
-                j_end = ELEMENTS_PER_VECTOR
-                while j < j_end:
+                while j < ELEMENTS_PER_VECTOR:
                     x: Float32 = loaded[j]
                     results[j] = soft_cap_temp * tanh(
                         x * multiplier / soft_cap_temp, fastmath=False
                     )
                     j = j + 1
 
-                # for i in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
-                # for i in range(ELEMENTS_PER_VECTOR):
-                #     x: Float32 = loaded[i]
-                #     results[i] = soft_cap_temp * tanh(
-                #         x * multiplier / soft_cap_temp, fastmath=False
-                #     )
                 cute.copy(store_atom, results, out4)
                 group = group + stride
-
-            # for group in range(tid, d // ELEMENTS_PER_VECTOR, stride):
-            #     input4: cute.Tensor = cute.local_tile(
-            #         input_row, (ELEMENTS_PER_VECTOR,), (group,)
-            #     )
-            #     out4: cute.Tensor = cute.local_tile(
-            #         out_row, (ELEMENTS_PER_VECTOR,), (group,)
-            #     )
-
-            #     cute.copy(load_atom, input4, loaded)
-            #     for i in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
-            #         x: Float32 = loaded[i]
-            #         results[i] = soft_cap_temp * tanh(
-            #             x * multiplier / soft_cap_temp, fastmath=False
-            #         )
-            #     cute.copy(store_atom, results, out4)
 
         @cute.kernel
         def kernel_scalar(
@@ -201,10 +178,19 @@ if HAS_CUTEDSL:
                 # num_vec = (d - skipped) // ELEMENTS_PER_VECTOR
                 # tail_start = skipped + num_vec * ELEMENTS_PER_VECTOR
 
-                # tail_start = Int32(skipped + (num_vec << 2))
+                num_vec = Int32((d - skipped) >> 2)  # elements per vector == 4
+                tail_start = Int32(skipped + (num_vec << 2))
 
                 i: int = tid
                 while i < skipped:
+                    x = Float32(input_row[i])
+                    out_row[i] = soft_cap_temp * tanh(
+                        x * multiplier / soft_cap_temp, fastmath=False
+                    )
+                    i = i + stride
+
+                i = tail_start + tid
+                while i < d:
                     x = Float32(input_row[i])
                     out_row[i] = soft_cap_temp * tanh(
                         x * multiplier / soft_cap_temp, fastmath=False
@@ -217,33 +203,19 @@ if HAS_CUTEDSL:
                 #         x * multiplier / soft_cap_temp, fastmath=False
                 #     )
 
-                in_vec_ptr = cute.make_ptr(
-                    input.element_type,
-                    input_row_addr + skipped * input_element_bytes,
-                    cute.AddressSpace.gmem,
-                    assumed_align=in_vec_bytes,
-                )
-                out_vec_ptr = cute.make_ptr(
-                    out.element_type,
-                    out_addr_after_skip,
-                    cute.AddressSpace.gmem,
-                    assumed_align=out_vec_bytes,
-                )
-
-                num_vec = Int32((d - skipped) >> 2)
                 if num_vec > 0:
-                    # in_vec_ptr = cute.make_ptr(
-                    #     input.element_type,
-                    #     input_row_addr + skipped * input_element_bytes,
-                    #     cute.AddressSpace.gmem,
-                    #     assumed_align=in_vec_bytes,
-                    # )
-                    # out_vec_ptr = cute.make_ptr(
-                    #     out.element_type,
-                    #     out_addr_after_skip,
-                    #     cute.AddressSpace.gmem,
-                    #     assumed_align=out_vec_bytes,
-                    # )
+                    in_vec_ptr = cute.make_ptr(
+                        input.element_type,
+                        input_row_addr + skipped * input_element_bytes,
+                        cute.AddressSpace.gmem,
+                        assumed_align=in_vec_bytes,
+                    )
+                    out_vec_ptr = cute.make_ptr(
+                        out.element_type,
+                        out_addr_after_skip,
+                        cute.AddressSpace.gmem,
+                        assumed_align=out_vec_bytes,
+                    )
 
                     vec_layout = cute.make_layout(
                         (ELEMENTS_PER_VECTOR, num_vec), stride=(1, ELEMENTS_PER_VECTOR)
@@ -303,16 +275,16 @@ if HAS_CUTEDSL:
                     #         )
                     #     cute.copy(store_atom, results, out4)
 
-                rem_len = Int32(d - skipped)
-                tail_in = cute.make_tensor(in_vec_ptr, cute.make_layout(rem_len))
-                tail_out = cute.make_tensor(out_vec_ptr, cute.make_layout(rem_len))
-                t_idx = Int32((num_vec << 2) + tid)
-                while t_idx < rem_len:
-                    x = Float32(tail_in[t_idx])
-                    tail_out[t_idx] = soft_cap_temp * tanh(
-                        x * multiplier / soft_cap_temp, fastmath=False
-                    )
-                    t_idx = t_idx + stride
+                # rem_len = Int32(d - skipped)
+                # tail_in = cute.make_tensor(in_vec_ptr, cute.make_layout(rem_len))
+                # tail_out = cute.make_tensor(out_vec_ptr, cute.make_layout(rem_len))
+                # t_idx = Int32((num_vec << 2) + tid)
+                # while t_idx < rem_len:
+                #     x = Float32(tail_in[t_idx])
+                #     tail_out[t_idx] = soft_cap_temp * tanh(
+                #         x * multiplier / soft_cap_temp, fastmath=False
+                #     )
+                #     t_idx = t_idx + stride
 
                 # i = tail_start + tid
                 # while i < d:
