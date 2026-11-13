@@ -59,30 +59,42 @@ if HAS_CUTEDSL:
             if cutlass.const_expr(vectorized):
                 d = cute.assume(d, divby=ELEMENTS_PER_VECTOR)
 
-            if cutlass.const_expr(vectorized):
-                self.kernel_vectorized(
-                    out_ptr,
-                    input_ptr,
-                    d,
-                    multiplier,
-                    soft_cap_temp,
-                ).launch(
-                    grid=(num_tokens, blocks_per_row, 1),
-                    block=(THREADS_PER_BLOCK, 1, 1),
-                    stream=stream,
-                )
-            else:
-                self.kernel_scalar(
-                    out_ptr,
-                    input_ptr,
-                    d,
-                    multiplier,
-                    soft_cap_temp,
-                ).launch(
-                    grid=(num_tokens, blocks_per_row, 1),
-                    block=(THREADS_PER_BLOCK, 1, 1),
-                    stream=stream,
-                )
+            self.kernel_scalar(
+                out_ptr,
+                input_ptr,
+                d,
+                multiplier,
+                soft_cap_temp,
+            ).launch(
+                grid=(num_tokens, blocks_per_row, 1),
+                block=(THREADS_PER_BLOCK, 1, 1),
+                stream=stream,
+            )
+
+            # if cutlass.const_expr(vectorized):
+            #     self.kernel_vectorized(
+            #         out_ptr,
+            #         input_ptr,
+            #         d,
+            #         multiplier,
+            #         soft_cap_temp,
+            #     ).launch(
+            #         grid=(num_tokens, blocks_per_row, 1),
+            #         block=(THREADS_PER_BLOCK, 1, 1),
+            #         stream=stream,
+            #     )
+            # else:
+            #     self.kernel_scalar(
+            #         out_ptr,
+            #         input_ptr,
+            #         d,
+            #         multiplier,
+            #         soft_cap_temp,
+            #     ).launch(
+            #         grid=(num_tokens, blocks_per_row, 1),
+            #         block=(THREADS_PER_BLOCK, 1, 1),
+            #         stream=stream,
+            #     )
 
         @cute.kernel
         def kernel_vectorized(
