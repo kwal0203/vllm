@@ -106,7 +106,7 @@ if HAS_CUTEDSL:
                 & ((out_row_addr & (out_vec_bytes - 1)) == 0)
                 & ((d & (ELEMENTS_PER_VECTOR - 1)) == 0)
             )
-            can_vec = True
+
             if can_vec:
                 num_vec: Int32 = Int32(d >> 2)  # elements per vector == 4
                 in_vec_ptr: cute.Pointer = cute.make_ptr(
@@ -155,92 +155,92 @@ if HAS_CUTEDSL:
                         )
                     cute.copy(store_atom, results, out_vectors[None, group])
                     group = group + stride
-            else:
-                alignment_mask = in_vec_bytes - 1
-                misalignment_bytes = Int32(input_row_addr & alignment_mask)
-                skipped_bytes = (in_vec_bytes - misalignment_bytes) & alignment_mask
-                skipped = min(skipped_bytes // input_element_bytes, d)
-                out_addr_after_skip = out_row_addr + skipped * out_element_bytes
+            # else:
+            #     alignment_mask = in_vec_bytes - 1
+            #     misalignment_bytes = Int32(input_row_addr & alignment_mask)
+            #     skipped_bytes = (in_vec_bytes - misalignment_bytes) & alignment_mask
+            #     skipped = min(skipped_bytes // input_element_bytes, d)
+            #     out_addr_after_skip = out_row_addr + skipped * out_element_bytes
 
-                out_misaligned = Int32(
-                    out_addr_after_skip & (out_vec_bytes - 1)
-                ) != Int32(0)
+            #     out_misaligned = Int32(
+            #         out_addr_after_skip & (out_vec_bytes - 1)
+            #     ) != Int32(0)
 
-                if out_misaligned:
-                    # Process the entire row with scalar operations.
-                    i = tid
-                    while i < d:
-                        x = Float32(input_row[i])
-                        out_row[i] = soft_cap_temp * tanh(
-                            x * multiplier / soft_cap_temp, fastmath=False
-                        )
-                        i = i + stride
-                else:
-                    # Process the scalar prefix, vectorized middle, and scalar tail.
-                    num_vec = Int32((d - skipped) >> 2)  # elements per vector == 4
-                    tail_start = Int32(skipped + (num_vec << 2))
+            #     if out_misaligned:
+            #         # Process the entire row with scalar operations.
+            #         i = tid
+            #         while i < d:
+            #             x = Float32(input_row[i])
+            #             out_row[i] = soft_cap_temp * tanh(
+            #                 x * multiplier / soft_cap_temp, fastmath=False
+            #             )
+            #             i = i + stride
+            #     else:
+            #         # Process the scalar prefix, vectorized middle, and scalar tail.
+            #         num_vec = Int32((d - skipped) >> 2)  # elements per vector == 4
+            #         tail_start = Int32(skipped + (num_vec << 2))
 
-                    i = tid
-                    if i < skipped:
-                        x = Float32(input_row[i])
-                        out_row[i] = soft_cap_temp * tanh(
-                            x * multiplier / soft_cap_temp, fastmath=False
-                        )
+            #         i = tid
+            #         if i < skipped:
+            #             x = Float32(input_row[i])
+            #             out_row[i] = soft_cap_temp * tanh(
+            #                 x * multiplier / soft_cap_temp, fastmath=False
+            #             )
 
-                    if num_vec > 0:
-                        in_vec_ptr = cute.make_ptr(
-                            input.dtype,
-                            input_row_addr + skipped * input_element_bytes,
-                            cute.AddressSpace.gmem,
-                            assumed_align=in_vec_bytes,
-                        )
-                        out_vec_ptr = cute.make_ptr(
-                            out.dtype,
-                            out_addr_after_skip,
-                            cute.AddressSpace.gmem,
-                            assumed_align=out_vec_bytes,
-                        )
+            #         if num_vec > 0:
+            #             in_vec_ptr = cute.make_ptr(
+            #                 input.dtype,
+            #                 input_row_addr + skipped * input_element_bytes,
+            #                 cute.AddressSpace.gmem,
+            #                 assumed_align=in_vec_bytes,
+            #             )
+            #             out_vec_ptr = cute.make_ptr(
+            #                 out.dtype,
+            #                 out_addr_after_skip,
+            #                 cute.AddressSpace.gmem,
+            #                 assumed_align=out_vec_bytes,
+            #             )
 
-                        vec_layout = cute.make_layout(
-                            (ELEMENTS_PER_VECTOR, num_vec),
-                            stride=(1, ELEMENTS_PER_VECTOR),
-                        )
-                        input_vectors = cute.make_tensor(in_vec_ptr, vec_layout)
-                        out_vectors = cute.make_tensor(out_vec_ptr, vec_layout)
+            #             vec_layout = cute.make_layout(
+            #                 (ELEMENTS_PER_VECTOR, num_vec),
+            #                 stride=(1, ELEMENTS_PER_VECTOR),
+            #             )
+            #             input_vectors = cute.make_tensor(in_vec_ptr, vec_layout)
+            #             out_vectors = cute.make_tensor(out_vec_ptr, vec_layout)
 
-                        load_atom = cute.make_copy_atom(
-                            cute.nvgpu.CopyUniversalOp(),
-                            input.dtype,
-                            num_bits_per_copy=in_vec_bytes * 8,
-                        )
-                        store_atom = cute.make_copy_atom(
-                            cute.nvgpu.CopyUniversalOp(), Float32, num_bits_per_copy=128
-                        )
+            #             load_atom = cute.make_copy_atom(
+            #                 cute.nvgpu.CopyUniversalOp(),
+            #                 input.dtype,
+            #                 num_bits_per_copy=in_vec_bytes * 8,
+            #             )
+            #             store_atom = cute.make_copy_atom(
+            #                 cute.nvgpu.CopyUniversalOp(), Float32, num_bits_per_copy=128
+            #             )
 
-                        loaded = cute.make_rmem_tensor(
-                            cute.make_layout(ELEMENTS_PER_VECTOR), input.dtype
-                        )
-                        results = cute.make_rmem_tensor(
-                            cute.make_layout(ELEMENTS_PER_VECTOR), Float32
-                        )
+            #             loaded = cute.make_rmem_tensor(
+            #                 cute.make_layout(ELEMENTS_PER_VECTOR), input.dtype
+            #             )
+            #             results = cute.make_rmem_tensor(
+            #                 cute.make_layout(ELEMENTS_PER_VECTOR), Float32
+            #             )
 
-                        group = tid
-                        while group < num_vec:
-                            cute.copy(load_atom, input_vectors[None, group], loaded)
-                            for k in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
-                                x = Float32(loaded[k])
-                                results[k] = soft_cap_temp * tanh(
-                                    x * multiplier / soft_cap_temp, fastmath=False
-                                )
-                            cute.copy(store_atom, results, out_vectors[None, group])
-                            group = group + stride
+            #             group = tid
+            #             while group < num_vec:
+            #                 cute.copy(load_atom, input_vectors[None, group], loaded)
+            #                 for k in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
+            #                     x = Float32(loaded[k])
+            #                     results[k] = soft_cap_temp * tanh(
+            #                         x * multiplier / soft_cap_temp, fastmath=False
+            #                     )
+            #                 cute.copy(store_atom, results, out_vectors[None, group])
+            #                 group = group + stride
 
-                    i = tail_start + tid
-                    if i < d:
-                        x = Float32(input_row[i])
-                        out_row[i] = soft_cap_temp * tanh(
-                            x * multiplier / soft_cap_temp, fastmath=False
-                        )
+            #         i = tail_start + tid
+            #         if i < d:
+            #             x = Float32(input_row[i])
+            #             out_row[i] = soft_cap_temp * tanh(
+            #                 x * multiplier / soft_cap_temp, fastmath=False
+            #             )
 
             # if can_vectorize:
             #     num_vec = Int32((d - skipped) >> 2)  # elements per vector == 4
