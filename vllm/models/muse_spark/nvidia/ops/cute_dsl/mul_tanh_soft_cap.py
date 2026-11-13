@@ -182,8 +182,8 @@ if HAS_CUTEDSL:
             bdimx, _, _ = cute.arch.block_dim()
             _, gdimy, _ = cute.arch.grid_dim()
 
-            tid: Int32 = bidy * bdimx + tidx
-            # const int tid = blockIdx.y * blockDim.x + threadIdx.x;
+            # tid: Int32 = bidy * bdimx + tidx
+            # # const int tid = blockIdx.y * blockDim.x + threadIdx.x;
 
             stride: Int32 = gdimy * bdimx
             # const int stride = gridDim.y * blockDim.x;
@@ -191,90 +191,90 @@ if HAS_CUTEDSL:
             row_offset: Int64 = Int64(bidx) * Int64(d)
             # const int64_t row_offset = static_cast<int64_t>(blockIdx.x) * d;
 
-            row_layout: cute.Layout = cute.make_layout(d)
-            input_row: cute.Tensor = cute.make_tensor(input + row_offset, row_layout)
-            # const scalar_t* __restrict__ in_row = input + row_offset;
-            out_row: cute.Tensor = cute.make_tensor(out + row_offset, row_layout)
-            # float* __restrict__ out_row = out + row_offset;
+            # row_layout: cute.Layout = cute.make_layout(d)
+            # input_row: cute.Tensor = cute.make_tensor(input + row_offset, row_layout)
+            # # const scalar_t* __restrict__ in_row = input + row_offset;
+            # out_row: cute.Tensor = cute.make_tensor(out + row_offset, row_layout)
+            # # float* __restrict__ out_row = out + row_offset;
 
-            input_row_addr = input_row.iterator.toint()
-            # uintptr_t addr = reinterpret_cast<uintptr_t>(in);
-            out_row_addr = out_row.iterator.toint()
-            # uintptr_t out_addr = reinterpret_cast<uintptr_t>(out);
+            # input_row_addr = input_row.iterator.toint()
+            # # uintptr_t addr = reinterpret_cast<uintptr_t>(in);
+            # out_row_addr = out_row.iterator.toint()
+            # # uintptr_t out_addr = reinterpret_cast<uintptr_t>(out);
 
-            input_element_bytes = input.dtype.width >> 3
-            out_element_bytes = out.dtype.width >> 3
+            # input_element_bytes = input.dtype.width >> 3
+            # out_element_bytes = out.dtype.width >> 3
 
-            in_vec_bytes = ELEMENTS_PER_VECTOR * input_element_bytes
-            # constexpr int WIDTH = VEC_SIZE * sizeof(InT);       // eg: 16 B
-            out_vec_bytes = ELEMENTS_PER_VECTOR * out_element_bytes
-            # constexpr int OUT_WIDTH = VEC_SIZE * sizeof(OutT);  // eg: 16 B
+            # in_vec_bytes = ELEMENTS_PER_VECTOR * input_element_bytes
+            # # constexpr int WIDTH = VEC_SIZE * sizeof(InT);       // eg: 16 B
+            # out_vec_bytes = ELEMENTS_PER_VECTOR * out_element_bytes
+            # # constexpr int OUT_WIDTH = VEC_SIZE * sizeof(OutT);  // eg: 16 B
 
-            can_vec = (
-                ((input_row_addr & (in_vec_bytes - 1)) == 0)
-                & ((out_row_addr & (out_vec_bytes - 1)) == 0)
-                & ((d & (ELEMENTS_PER_VECTOR - 1)) == 0)
+            # can_vec = (
+            #     ((input_row_addr & (in_vec_bytes - 1)) == 0)
+            #     & ((out_row_addr & (out_vec_bytes - 1)) == 0)
+            #     & ((d & (ELEMENTS_PER_VECTOR - 1)) == 0)
+            # )
+            # # bool can_vec =
+            # # ((addr & (WIDTH - 1)) == 0) &&
+            # # ((out_addr & (OUT_WIDTH - 1)) == 0) &&
+            # # ((len & (VEC_SIZE - 1)) == 0);
+
+            # if can_vec:
+            input_dtype = input.dtype
+            input_vector_bits = ELEMENTS_PER_VECTOR * input_dtype.width
+            row_offset = Int64(bidx) * Int64(d)
+            num_vec = d >> 2  # Four elements per vector.
+
+            vec_layout = cute.make_layout(
+                (ELEMENTS_PER_VECTOR, num_vec),
+                stride=(1, ELEMENTS_PER_VECTOR),
             )
-            # bool can_vec =
-            # ((addr & (WIDTH - 1)) == 0) &&
-            # ((out_addr & (OUT_WIDTH - 1)) == 0) &&
-            # ((len & (VEC_SIZE - 1)) == 0);
 
-            if can_vec:
-                input_dtype = input.dtype
-                input_vector_bits = ELEMENTS_PER_VECTOR * input_dtype.width
-                row_offset = Int64(bidx) * Int64(d)
-                num_vec = d >> 2  # Four elements per vector.
+            input_row_ptr = cute.make_ptr(
+                input_dtype,
+                (input + row_offset).toint(),
+                cute.AddressSpace.gmem,
+                assumed_align=input_vector_bits // 8,
+            )
+            out_row_ptr = cute.make_ptr(
+                Float32,
+                (out + row_offset).toint(),
+                cute.AddressSpace.gmem,
+                assumed_align=VECTOR_ALIGNMENT_BYTES,
+            )
+            input_vectors = cute.make_tensor(input_row_ptr, vec_layout)
+            out_vectors = cute.make_tensor(out_row_ptr, vec_layout)
 
-                vec_layout = cute.make_layout(
-                    (ELEMENTS_PER_VECTOR, num_vec),
-                    stride=(1, ELEMENTS_PER_VECTOR),
-                )
+            load_atom = cute.make_copy_atom(
+                cute.nvgpu.CopyUniversalOp(),
+                input_dtype,
+                num_bits_per_copy=input_vector_bits,
+            )
+            store_atom = cute.make_copy_atom(
+                cute.nvgpu.CopyUniversalOp(),
+                Float32,
+                num_bits_per_copy=ELEMENTS_PER_VECTOR * Float32.width,
+            )
 
-                input_row_ptr = cute.make_ptr(
-                    input_dtype,
-                    (input + row_offset).toint(),
-                    cute.AddressSpace.gmem,
-                    assumed_align=input_vector_bits // 8,
-                )
-                out_row_ptr = cute.make_ptr(
-                    Float32,
-                    (out + row_offset).toint(),
-                    cute.AddressSpace.gmem,
-                    assumed_align=VECTOR_ALIGNMENT_BYTES,
-                )
-                input_vectors = cute.make_tensor(input_row_ptr, vec_layout)
-                out_vectors = cute.make_tensor(out_row_ptr, vec_layout)
+            fragment_layout = cute.make_layout(ELEMENTS_PER_VECTOR)
+            loaded = cute.make_rmem_tensor(fragment_layout, input_dtype)
+            results = cute.make_rmem_tensor(fragment_layout, Float32)
 
-                load_atom = cute.make_copy_atom(
-                    cute.nvgpu.CopyUniversalOp(),
-                    input_dtype,
-                    num_bits_per_copy=input_vector_bits,
-                )
-                store_atom = cute.make_copy_atom(
-                    cute.nvgpu.CopyUniversalOp(),
-                    Float32,
-                    num_bits_per_copy=ELEMENTS_PER_VECTOR * Float32.width,
-                )
+            group = bidy * bdimx + tidx
+            stride = gdimy * bdimx
+            while group < num_vec:
+                cute.copy(load_atom, input_vectors[None, group], loaded)
 
-                fragment_layout = cute.make_layout(ELEMENTS_PER_VECTOR)
-                loaded = cute.make_rmem_tensor(fragment_layout, input_dtype)
-                results = cute.make_rmem_tensor(fragment_layout, Float32)
+                for j in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
+                    x = Float32(loaded[j])
+                    results[j] = soft_cap_temp * tanh(
+                        x * multiplier / soft_cap_temp,
+                        fastmath=False,
+                    )
 
-                group = bidy * bdimx + tidx
-                stride = gdimy * bdimx
-                while group < num_vec:
-                    cute.copy(load_atom, input_vectors[None, group], loaded)
-
-                    for j in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
-                        x = Float32(loaded[j])
-                        results[j] = soft_cap_temp * tanh(
-                            x * multiplier / soft_cap_temp,
-                            fastmath=False,
-                        )
-
-                    cute.copy(store_atom, results, out_vectors[None, group])
-                    group = group + stride
+                cute.copy(store_atom, results, out_vectors[None, group])
+                group = group + stride
                 # for (int i = tid; i < num_vec; i += stride) {
                 # vout_t tmp;
                 # // Make a local copy of the entire pack
@@ -282,136 +282,137 @@ if HAS_CUTEDSL:
                 # vec_op(tmp, src);
                 # v_out[i] = tmp;  // <- encourages a single vector st
                 # return;
-            else:
-                alignment_mask = in_vec_bytes - 1
-                misalignment_bytes = Int32(input_row_addr & alignment_mask)
-                # int misalignment_offset = addr & (WIDTH - 1);       // addr % 64
+            # else:
+            #     alignment_mask = in_vec_bytes - 1
+            #     misalignment_bytes = Int32(input_row_addr & alignment_mask)
+            #     # int misalignment_offset = addr & (WIDTH - 1);       // addr % 64
 
-                skipped_bytes = (in_vec_bytes - misalignment_bytes) & alignment_mask
-                # int alignment_bytes = WIDTH - misalignment_offset;  // 64 -
-                # (addr % 64)
+            #     skipped_bytes = (in_vec_bytes - misalignment_bytes) & alignment_mask
+            #     # int alignment_bytes = WIDTH - misalignment_offset;  // 64 -
+            #     # (addr % 64)
 
-                skipped = min(skipped_bytes // input_element_bytes, d)
-                # int prefix_elems = alignment_bytes & (WIDTH - 1);   // handle 64
-                # prefix_elems /= sizeof(InT);
-                # prefix_elems = min(prefix_elems, len);  // 0 ≤ prefix < 16
+            #     skipped = min(skipped_bytes // input_element_bytes, d)
+            #     # int prefix_elems = alignment_bytes & (WIDTH - 1);   // handle 64
+            #     # prefix_elems /= sizeof(InT);
+            #     # prefix_elems = min(prefix_elems, len);  // 0 ≤ prefix < 16
 
-                out_addr_after_skip = out_row_addr + skipped * out_element_bytes
-                out_misaligned = Int32(
-                    out_addr_after_skip & (out_vec_bytes - 1)
-                ) != Int32(0)
+            #     out_addr_after_skip = out_row_addr + skipped * out_element_bytes
+            #     out_misaligned = Int32(
+            #         out_addr_after_skip & (out_vec_bytes - 1)
+            #     ) != Int32(0)
 
-                if out_misaligned:
-                    # Process the entire row with scalar operations.
-                    i = tid
-                    while i < d:
-                        x = Float32(input_row[i])
-                        out_row[i] = soft_cap_temp * tanh(
-                            x * multiplier / soft_cap_temp, fastmath=False
-                        )
-                        i = i + stride
-                    # if (((out_addr + prefix_elems * sizeof(OutT)) & (OUT_WIDTH - 1))
-                    # != 0) {
-                    #     for (int i = tid; i < len; i += stride) {
-                    #     scalar_op(out[i], in[i]);
-                    #     }
-                    #     return;
-                    # }
-                else:
-                    # Process the scalar prefix, vectorized middle, and scalar tail.
-                    num_vec = Int32((d - skipped) >> 2)  # elements per vector == 4
-                    tail_start = Int32(skipped + (num_vec << 2))
+            #     if out_misaligned:
+            #         # Process the entire row with scalar operations.
+            #         i = tid
+            #         while i < d:
+            #             x = Float32(input_row[i])
+            #             out_row[i] = soft_cap_temp * tanh(
+            #                 x * multiplier / soft_cap_temp, fastmath=False
+            #             )
+            #             i = i + stride
+            #         # if (((out_addr + prefix_elems * sizeof(OutT)) & (OUT_WIDTH - 1))
+            #         # != 0) {
+            #         #     for (int i = tid; i < len; i += stride) {
+            #         #     scalar_op(out[i], in[i]);
+            #         #     }
+            #         #     return;
+            #         # }
+            #     else:
+            #         # Process the scalar prefix, vectorized middle, and scalar tail.
+            #         num_vec = Int32((d - skipped) >> 2)  # elements per vector == 4
+            #         tail_start = Int32(skipped + (num_vec << 2))
 
-                    i = tid
-                    if i < skipped:
-                        x = Float32(input_row[i])
-                        out_row[i] = soft_cap_temp * tanh(
-                            x * multiplier / soft_cap_temp, fastmath=False
-                        )
+            #         i = tid
+            #         if i < skipped:
+            #             x = Float32(input_row[i])
+            #             out_row[i] = soft_cap_temp * tanh(
+            #                 x * multiplier / soft_cap_temp, fastmath=False
+            #             )
 
-                    # // 1. prefill the when it is unsafe to vectorize
-                    # for (int i = tid; i < prefix_elems; i += stride) {
-                    #     scalar_op(out[i], in[i]);
-                    # }
+            #         # // 1. prefill the when it is unsafe to vectorize
+            #         # for (int i = tid; i < prefix_elems; i += stride) {
+            #         #     scalar_op(out[i], in[i]);
+            #         # }
 
-                    if num_vec > 0:
-                        in_vec_ptr = cute.make_ptr(
-                            input.dtype,
-                            input_row_addr + skipped * input_element_bytes,
-                            cute.AddressSpace.gmem,
-                            assumed_align=in_vec_bytes,
-                        )
-                        out_vec_ptr = cute.make_ptr(
-                            out.dtype,
-                            out_addr_after_skip,
-                            cute.AddressSpace.gmem,
-                            assumed_align=out_vec_bytes,
-                        )
+            #         if num_vec > 0:
+            #             in_vec_ptr = cute.make_ptr(
+            #                 input.dtype,
+            #                 input_row_addr + skipped * input_element_bytes,
+            #                 cute.AddressSpace.gmem,
+            #                 assumed_align=in_vec_bytes,
+            #             )
+            #             out_vec_ptr = cute.make_ptr(
+            #                 out.dtype,
+            #                 out_addr_after_skip,
+            #                 cute.AddressSpace.gmem,
+            #                 assumed_align=out_vec_bytes,
+            #             )
 
-                        vec_layout = cute.make_layout(
-                            (ELEMENTS_PER_VECTOR, num_vec),
-                            stride=(1, ELEMENTS_PER_VECTOR),
-                        )
-                        input_vectors = cute.make_tensor(in_vec_ptr, vec_layout)
-                        out_vectors = cute.make_tensor(out_vec_ptr, vec_layout)
+            #             vec_layout = cute.make_layout(
+            #                 (ELEMENTS_PER_VECTOR, num_vec),
+            #                 stride=(1, ELEMENTS_PER_VECTOR),
+            #             )
+            #             input_vectors = cute.make_tensor(in_vec_ptr, vec_layout)
+            #             out_vectors = cute.make_tensor(out_vec_ptr, vec_layout)
 
-                        load_atom = cute.make_copy_atom(
-                            cute.nvgpu.CopyUniversalOp(),
-                            input.dtype,
-                            num_bits_per_copy=in_vec_bytes * 8,
-                        )
-                        store_atom = cute.make_copy_atom(
-                            cute.nvgpu.CopyUniversalOp(), Float32, num_bits_per_copy=128
-                        )
+            #             load_atom = cute.make_copy_atom(
+            #                 cute.nvgpu.CopyUniversalOp(),
+            #                 input.dtype,
+            #                 num_bits_per_copy=in_vec_bytes * 8,
+            #             )
+            #             store_atom = cute.make_copy_atom(
+            #                 cute.nvgpu.CopyUniversalOp(), Float32, num_bits_per_copy=
+            # 128
+            #             )
 
-                        loaded = cute.make_rmem_tensor(
-                            cute.make_layout(ELEMENTS_PER_VECTOR), input.dtype
-                        )
-                        results = cute.make_rmem_tensor(
-                            cute.make_layout(ELEMENTS_PER_VECTOR), Float32
-                        )
+            #             loaded = cute.make_rmem_tensor(
+            #                 cute.make_layout(ELEMENTS_PER_VECTOR), input.dtype
+            #             )
+            #             results = cute.make_rmem_tensor(
+            #                 cute.make_layout(ELEMENTS_PER_VECTOR), Float32
+            #             )
 
-                        group = tid
-                        while group < num_vec:
-                            cute.copy(load_atom, input_vectors[None, group], loaded)
-                            for k in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
-                                x = Float32(loaded[k])
-                                results[k] = soft_cap_temp * tanh(
-                                    x * multiplier / soft_cap_temp, fastmath=False
-                                )
-                            cute.copy(store_atom, results, out_vectors[None, group])
-                            group = group + stride
+            #             group = tid
+            #             while group < num_vec:
+            #                 cute.copy(load_atom, input_vectors[None, group], loaded)
+            #                 for k in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
+            #                     x = Float32(loaded[k])
+            #                     results[k] = soft_cap_temp * tanh(
+            #                         x * multiplier / soft_cap_temp, fastmath=False
+            #                     )
+            #                 cute.copy(store_atom, results, out_vectors[None, group])
+            #                 group = group + stride
 
-                    # in += prefix_elems;
-                    # out += prefix_elems;
-                    # len -= prefix_elems;
+            #         # in += prefix_elems;
+            #         # out += prefix_elems;
+            #         # len -= prefix_elems;
 
-                    # int num_vec = len / VEC_SIZE;
-                    # using vin_t = vec_n_t<InT, VEC_SIZE>;
-                    # using vout_t = vec_n_t<OutT, VEC_SIZE>;
-                    # auto* v_in = reinterpret_cast<const vin_t*>(in);
-                    # auto* v_out = reinterpret_cast<vout_t*>(out);
+            #         # int num_vec = len / VEC_SIZE;
+            #         # using vin_t = vec_n_t<InT, VEC_SIZE>;
+            #         # using vout_t = vec_n_t<OutT, VEC_SIZE>;
+            #         # auto* v_in = reinterpret_cast<const vin_t*>(in);
+            #         # auto* v_out = reinterpret_cast<vout_t*>(out);
 
-                    # // 2. vectorize the main part
-                    # for (int i = tid; i < num_vec; i += stride) {
-                    #     vout_t tmp;
-                    #     // Make a local copy of the entire pack
-                    #     vin_t src = v_in[i];  // <- encourages a single vector ld
-                    #     vec_op(tmp, src);
-                    #     v_out[i] = tmp;  // <- encourages a single vector st
-                    # }
+            #         # // 2. vectorize the main part
+            #         # for (int i = tid; i < num_vec; i += stride) {
+            #         #     vout_t tmp;
+            #         #     // Make a local copy of the entire pack
+            #         #     vin_t src = v_in[i];  // <- encourages a single vector ld
+            #         #     vec_op(tmp, src);
+            #         #     v_out[i] = tmp;  // <- encourages a single vector st
+            #         # }
 
-                    i = tail_start + tid
-                    if i < d:
-                        x = Float32(input_row[i])
-                        out_row[i] = soft_cap_temp * tanh(
-                            x * multiplier / soft_cap_temp, fastmath=False
-                        )
-                    # // 3. handle the tail
-                    # int tail_start = num_vec * VEC_SIZE;
-                    # for (int i = tid + tail_start; i < len; i += stride) {
-                    #     scalar_op(out[i], in[i]);
-                    # }
+            #         i = tail_start + tid
+            #         if i < d:
+            #             x = Float32(input_row[i])
+            #             out_row[i] = soft_cap_temp * tanh(
+            #                 x * multiplier / soft_cap_temp, fastmath=False
+            #             )
+            #         # // 3. handle the tail
+            #         # int tail_start = num_vec * VEC_SIZE;
+            #         # for (int i = tid + tail_start; i < len; i += stride) {
+            #         #     scalar_op(out[i], in[i]);
+            #         # }
 
             # if can_vectorize:
             #     num_vec = Int32((d - skipped) >> 2)  # elements per vector == 4
