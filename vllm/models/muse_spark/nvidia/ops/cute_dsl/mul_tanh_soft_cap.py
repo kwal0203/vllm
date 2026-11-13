@@ -235,12 +235,12 @@ if HAS_CUTEDSL:
                     assumed_align=out_vec_bytes,
                 )
 
-                vec_layout = cute.make_layout(
-                    (ELEMENTS_PER_VECTOR, num_vec),
-                    stride=(1, ELEMENTS_PER_VECTOR),
-                )
-                input_vectors = cute.make_tensor(in_vec_ptr, vec_layout)
-                out_vectors = cute.make_tensor(out_vec_ptr, vec_layout)
+                # vec_layout = cute.make_layout(
+                #     (ELEMENTS_PER_VECTOR, num_vec),
+                #     stride=(1, ELEMENTS_PER_VECTOR),
+                # )
+                # input_vectors = cute.make_tensor(in_vec_ptr, vec_layout)
+                # out_vectors = cute.make_tensor(out_vec_ptr, vec_layout)
 
                 load_atom = cute.make_copy_atom(
                     cute.nvgpu.CopyUniversalOp(),
@@ -257,17 +257,41 @@ if HAS_CUTEDSL:
                 loaded = cute.make_rmem_tensor(fragment_layout, input.dtype)
                 results = cute.make_rmem_tensor(fragment_layout, out.dtype)
 
+                # group = tid
+                # while group < num_vec:
+                #     cute.copy(load_atom, input_vectors[None, group], loaded)
+
+                #     for j in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
+                #         x = Float32(loaded[j])
+                #         results[j] = soft_cap_temp * tanh(
+                #             x * multiplier / soft_cap_temp, fastmath=False
+                #         )
+
+                #     cute.copy(store_atom, results, out_vectors[None, group])
+                #     group = group + stride
                 group = tid
                 while group < num_vec:
-                    cute.copy(load_atom, input_vectors[None, group], loaded)
+                    # Typed pointer arithmetic uses elements. Both pointers advance by
+                    # four elements per group, regardless of their dtype.
+                    element_offset = cute.assume(
+                        group * ELEMENTS_PER_VECTOR,
+                        divby=ELEMENTS_PER_VECTOR,
+                    )
+                    input_pack = cute.make_tensor(
+                        in_vec_ptr + element_offset, fragment_layout
+                    )
+                    output_pack = cute.make_tensor(
+                        out_vec_ptr + element_offset, fragment_layout
+                    )
 
+                    cute.copy(load_atom, input_pack, loaded)
                     for j in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
                         x = Float32(loaded[j])
                         results[j] = soft_cap_temp * tanh(
-                            x * multiplier / soft_cap_temp, fastmath=False
+                            x * multiplier / soft_cap_temp,
+                            fastmath=False,
                         )
-
-                    cute.copy(store_atom, results, out_vectors[None, group])
+                    cute.copy(store_atom, results, output_pack)
                     group = group + stride
 
             # Scalar tail starts after the last complete vector.
