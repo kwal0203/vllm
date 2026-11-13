@@ -188,7 +188,7 @@ if HAS_CUTEDSL:
             _, gdimy, _ = cute.arch.grid_dim()
 
             tid = bidy * bdimx + tidx
-            stride = gdimy * bdimx
+            # stride = gdimy * bdimx
 
             row_offset = Int64(bidx) * Int64(d)
             row_layout = cute.make_layout(d)
@@ -258,7 +258,8 @@ if HAS_CUTEDSL:
                 results = cute.make_rmem_tensor(fragment_layout, out.dtype)
 
                 group = tid
-                while group < num_vec:
+                # while group < num_vec:
+                if group < num_vec:
                     cute.copy(load_atom, input_vectors[None, group], loaded)
 
                     for j in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
@@ -268,7 +269,7 @@ if HAS_CUTEDSL:
                         )
 
                     cute.copy(store_atom, results, out_vectors[None, group])
-                    group = group + stride
+                    # group = group + stride
 
             # Scalar tail starts after the last complete vector.
             tail_start = skipped + (num_vec << 2)
