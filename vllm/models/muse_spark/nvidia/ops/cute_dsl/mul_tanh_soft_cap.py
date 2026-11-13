@@ -280,9 +280,6 @@ if HAS_CUTEDSL:
                     input_pack = cute.make_tensor(
                         in_vec_ptr + element_offset, fragment_layout
                     )
-                    output_pack = cute.make_tensor(
-                        out_vec_ptr + element_offset, fragment_layout
-                    )
 
                     cute.copy(load_atom, input_pack, loaded)
                     for j in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
@@ -291,6 +288,9 @@ if HAS_CUTEDSL:
                             x * multiplier / soft_cap_temp,
                             fastmath=False,
                         )
+                    output_pack = cute.make_tensor(
+                        out_vec_ptr + element_offset, fragment_layout
+                    )
                     cute.copy(store_atom, results, output_pack)
                     group = group + stride
 
