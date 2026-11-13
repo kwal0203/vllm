@@ -106,7 +106,7 @@ if HAS_CUTEDSL:
                 & ((out_row_addr & (out_vec_bytes - 1)) == 0)
                 & ((d & (ELEMENTS_PER_VECTOR - 1)) == 0)
             )
-
+            can_vec = True
             if can_vec:
                 num_vec: Int32 = Int32(d >> 2)  # elements per vector == 4
                 in_vec_ptr: cute.Pointer = cute.make_ptr(
