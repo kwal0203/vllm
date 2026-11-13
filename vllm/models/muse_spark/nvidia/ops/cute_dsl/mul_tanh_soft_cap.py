@@ -46,6 +46,34 @@ assert (
 if HAS_CUTEDSL:
 
     class MulTanhSoftCapKernel:
+        # @cute.jit
+        # def __call__(
+        #     self,
+        #     out_ptr: cute.Pointer,
+        #     input_ptr: cute.Pointer,
+        #     d: Int32,
+        #     num_tokens: Int32,
+        #     blocks_per_row: Int32,
+        #     multiplier: Float32,
+        #     soft_cap_temp: Float32,
+        #     vectorized: cutlass.Constexpr,
+        #     stream: cuda.CUstream,
+        # ) -> None:
+        #     if cutlass.const_expr(vectorized):
+        #         d = cute.assume(d, divby=ELEMENTS_PER_VECTOR)
+
+        #     self.kernel_scalar(
+        #         out_ptr,
+        #         input_ptr,
+        #         d,
+        #         multiplier,
+        #         soft_cap_temp,
+        #     ).launch(
+        #         grid=(num_tokens, blocks_per_row, 1),
+        #         block=(THREADS_PER_BLOCK, 1, 1),
+        #         stream=stream,
+        #     )
+
         @cute.jit
         def __call__(
             self,
@@ -59,20 +87,86 @@ if HAS_CUTEDSL:
             vectorized: cutlass.Constexpr,
             stream: cuda.CUstream,
         ) -> None:
-            if cutlass.const_expr(vectorized):
-                d = cute.assume(d, divby=ELEMENTS_PER_VECTOR)
+            grid = (num_tokens, blocks_per_row, 1)
+            block = (THREADS_PER_BLOCK, 1, 1)
 
-            self.kernel_scalar(
-                out_ptr,
-                input_ptr,
-                d,
-                multiplier,
-                soft_cap_temp,
-            ).launch(
-                grid=(num_tokens, blocks_per_row, 1),
-                block=(THREADS_PER_BLOCK, 1, 1),
-                stream=stream,
+            if cutlass.const_expr(vectorized):
+                self.kernel_vectorized(
+                    out_ptr, input_ptr, d, multiplier, soft_cap_temp
+                ).launch(grid=grid, block=block, stream=stream)
+            else:
+                self.kernel_scalar(
+                    out_ptr, input_ptr, d, multiplier, soft_cap_temp
+                ).launch(grid=grid, block=block, stream=stream)
+
+        @cute.kernel
+        def kernel_vectorized(
+            self,
+            out: cute.Pointer,
+            input: cute.Pointer,
+            d: Int32,
+            multiplier: Float32,
+            soft_cap_temp: Float32,
+        ) -> None:
+            tidx, _, _ = cute.arch.thread_idx()
+            bidx, bidy, _ = cute.arch.block_idx()
+            bdimx, _, _ = cute.arch.block_dim()
+            _, gdimy, _ = cute.arch.grid_dim()
+
+            input_dtype = input.dtype
+            input_vector_bits = ELEMENTS_PER_VECTOR * input_dtype.width
+            row_offset = Int64(bidx) * Int64(d)
+            num_vec = d >> 2  # Four elements per vector.
+
+            vec_layout = cute.make_layout(
+                (ELEMENTS_PER_VECTOR, num_vec),
+                stride=(1, ELEMENTS_PER_VECTOR),
             )
+
+            input_row_ptr = cute.make_ptr(
+                input_dtype,
+                (input + row_offset).toint(),
+                cute.AddressSpace.gmem,
+                assumed_align=input_vector_bits // 8,
+            )
+            out_row_ptr = cute.make_ptr(
+                Float32,
+                (out + row_offset).toint(),
+                cute.AddressSpace.gmem,
+                assumed_align=VECTOR_ALIGNMENT_BYTES,
+            )
+            input_vectors = cute.make_tensor(input_row_ptr, vec_layout)
+            out_vectors = cute.make_tensor(out_row_ptr, vec_layout)
+
+            load_atom = cute.make_copy_atom(
+                cute.nvgpu.CopyUniversalOp(),
+                input_dtype,
+                num_bits_per_copy=input_vector_bits,
+            )
+            store_atom = cute.make_copy_atom(
+                cute.nvgpu.CopyUniversalOp(),
+                Float32,
+                num_bits_per_copy=ELEMENTS_PER_VECTOR * Float32.width,
+            )
+
+            fragment_layout = cute.make_layout(ELEMENTS_PER_VECTOR)
+            loaded = cute.make_rmem_tensor(fragment_layout, input_dtype)
+            results = cute.make_rmem_tensor(fragment_layout, Float32)
+
+            group = bidy * bdimx + tidx
+            stride = gdimy * bdimx
+            while group < num_vec:
+                cute.copy(load_atom, input_vectors[None, group], loaded)
+
+                for j in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
+                    x = Float32(loaded[j])
+                    results[j] = soft_cap_temp * tanh(
+                        x * multiplier / soft_cap_temp,
+                        fastmath=False,
+                    )
+
+                cute.copy(store_atom, results, out_vectors[None, group])
+                group = group + stride
 
         @cute.kernel
         def kernel_scalar(
