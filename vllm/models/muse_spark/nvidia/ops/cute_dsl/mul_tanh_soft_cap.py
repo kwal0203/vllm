@@ -59,12 +59,8 @@ if HAS_CUTEDSL:
             if cutlass.const_expr(vectorized):
                 d = cute.assume(d, divby=ELEMENTS_PER_VECTOR)
 
-            # layout: cute.Layout = cute.make_layout((num_tokens, d), stride=(d, 1))
-            # input_tensor: cute.Tensor = cute.make_tensor(input_ptr, layout)
-            # out_tensor: cute.Tensor = cute.make_tensor(out_ptr, layout)
             if cutlass.const_expr(vectorized):
                 self.kernel_vectorized(
-                    # out_tensor, input_tensor, d, multiplier, soft_cap_temp
                     out_ptr,
                     input_ptr,
                     d,
@@ -77,7 +73,6 @@ if HAS_CUTEDSL:
                 )
             else:
                 self.kernel_scalar(
-                    # out_tensor, input_tensor, d, multiplier, soft_cap_temp
                     out_ptr,
                     input_ptr,
                     d,
@@ -101,7 +96,7 @@ if HAS_CUTEDSL:
             tidx, _, _ = cute.arch.thread_idx()
             bidx, bidy, _ = cute.arch.block_idx()
             bdimx, _, _ = cute.arch.block_dim()
-            _, gdimy, _ = cute.arch.grid_dim()
+            # _, gdimy, _ = cute.arch.grid_dim()
 
             input_dtype = input.dtype
             input_vector_bits = ELEMENTS_PER_VECTOR * input_dtype.width
@@ -145,8 +140,9 @@ if HAS_CUTEDSL:
             results = cute.make_rmem_tensor(fragment_layout, Float32)
 
             group = bidy * bdimx + tidx
-            stride = gdimy * bdimx
-            while group < num_vec:
+            # stride = gdimy * bdimx
+            # while group < num_vec:
+            if group < num_vec:
                 cute.copy(load_atom, input_vectors[None, group], loaded)
 
                 for j in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
@@ -157,13 +153,11 @@ if HAS_CUTEDSL:
                     )
 
                 cute.copy(store_atom, results, out_vectors[None, group])
-                group = group + stride
+                # group = group + stride
 
         @cute.kernel
         def kernel_scalar(
             self,
-            # out: cute.Tensor,
-            # input: cute.Tensor,
             out: cute.Pointer,
             input: cute.Pointer,
             d: Int32,
@@ -184,7 +178,6 @@ if HAS_CUTEDSL:
             input_row = cute.make_tensor(input + row_offset, row_layout)
             out_row = cute.make_tensor(out + row_offset, row_layout)
 
-            # input_row = input[bidx, None]
             input_row_addr = input_row.iterator.toint()
             input_element_bytes = input.dtype.width // 8
 
@@ -194,7 +187,6 @@ if HAS_CUTEDSL:
             skipped_bytes = (in_vec_bytes - misalignment_bytes) & alignment_mask
             skipped = min(skipped_bytes // input_element_bytes, d)
 
-            # out_row = out[bidx, None]
             out_row_addr = out_row.iterator.toint()
             out_element_bytes = out.dtype.width // 8
             out_vec_bytes = ELEMENTS_PER_VECTOR * out_element_bytes
@@ -206,22 +198,11 @@ if HAS_CUTEDSL:
                 tail_start = Int32(skipped + (num_vec << 2))
 
                 i: int = tid
-                # while i < skipped:
                 if i < skipped:
                     x = Float32(input_row[i])
                     out_row[i] = soft_cap_temp * tanh(
                         x * multiplier / soft_cap_temp, fastmath=False
                     )
-                    # i = i + stride
-
-                # i = tail_start + tid
-                # # while i < d:
-                # if i < d:
-                #     x = Float32(input_row[i])
-                #     out_row[i] = soft_cap_temp * tanh(
-                #         x * multiplier / soft_cap_temp, fastmath=False
-                #     )
-                #     # i = i + stride
 
                 if num_vec > 0:
                     in_vec_ptr = cute.make_ptr(
@@ -260,7 +241,6 @@ if HAS_CUTEDSL:
                     )
 
                     group: int = tid
-                    # while group < num_vec:
                     if group < num_vec:
                         cute.copy(load_atom, input_vectors[None, group], loaded)
                         for k in cutlass.range_constexpr(ELEMENTS_PER_VECTOR):
@@ -269,16 +249,13 @@ if HAS_CUTEDSL:
                                 x * multiplier / soft_cap_temp, fastmath=False
                             )
                         cute.copy(store_atom, results, out_vectors[None, group])
-                        # group = group + stride
 
                 i = tail_start + tid
-                # while i < d:
                 if i < d:
                     x = Float32(input_row[i])
                     out_row[i] = soft_cap_temp * tanh(
                         x * multiplier / soft_cap_temp, fastmath=False
                     )
-                    # i = i + stride
 
             else:
                 i = tid
